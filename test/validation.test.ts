@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { validateView } from '../src/server/validation/validate';
 import { repoSnapshot } from '../src/server/indexer/git';
@@ -170,6 +170,51 @@ describe('edges', () => {
   });
 });
 
+describe('identity', () => {
+  it('keeps two slugs that sanitise to the same id apart instead of merging them', () => {
+    // Merging them would drop one node and silently re-point its edges at the other,
+    // which invents a relation between the wrong pair of nodes (SPEC R1).
+    const { view } = run(
+      agentGraph(
+        [
+          { slug: 'HTTP API', title: 'HTTP API', evidence: [{ file: 'src/index.ts', startLine: 1, endLine: 1 }] },
+          { slug: 'http-api', title: 'http-api', evidence: [{ file: 'src/util/log.ts', startLine: 1, endLine: 1 }] },
+        ],
+        [{ from: 'http-api', to: 'HTTP API', evidence: [{ file: 'src/index.ts', startLine: 1, endLine: 1 }] }],
+      ),
+    );
+
+    expect(view.nodes.map((n) => n.id)).toEqual(['L4:root/http-api', 'L4:root/http-api-2']);
+    expect(view.edges).toHaveLength(1);
+    expect(view.edges[0]).toMatchObject({ from: 'L4:root/http-api-2', to: 'L4:root/http-api' });
+  });
+
+  it('still reports the same slug used twice as a duplicate', () => {
+    const { view, issues } = run(
+      agentGraph([
+        { slug: 'app', title: 'first', evidence: [{ file: 'src/index.ts', startLine: 1, endLine: 1 }] },
+        { slug: 'app', title: 'second', evidence: [{ file: 'src/util/log.ts', startLine: 1, endLine: 1 }] },
+      ]),
+    );
+
+    expect(view.nodes).toHaveLength(1);
+    expect(issues.some((i) => i.message.includes('Duplicate node slug'))).toBe(true);
+  });
+
+  it('rejects evidence reached through a symlink that leaves the repository', () => {
+    const outside = join(repo, '..', 'outside-secret.txt');
+    writeFileSync(outside, 'not part of the analyzed repository\n', 'utf8');
+    symlinkSync(outside, join(repo, 'escape.txt'));
+
+    const { view, issues } = run(
+      agentGraph([{ slug: 'leak', evidence: [{ file: 'escape.txt', startLine: 1, endLine: 1 }] }]),
+    );
+
+    expect(view.nodes).toHaveLength(0);
+    expect(issues.some((i) => i.kind === 'evidence-outside-repo')).toBe(true);
+  });
+});
+
 describe('membership', () => {
   it('keeps a node that belongs to two subsystems at once', () => {
     const ev = [{ file: 'src/util/log.ts', startLine: 1, endLine: 1 }];
@@ -226,6 +271,27 @@ describe('scope and drill-in', () => {
     });
     expect(view.nodes.find((n) => n.id.endsWith('/flat'))?.childScope).toBeNull();
     expect(view.nodes.find((n) => n.id.endsWith('/db'))?.childScope).toBeNull();
+  });
+
+  it('keeps the repository root as the scope of a single-application node', () => {
+    // SPEC 6.1 with the accepted L4 decision: a one-application repository is the
+    // normal case, and "." is how the agent names the area that application covers.
+    // `rootScope` and `filesUnder` both treat "." as the whole repository, so a node
+    // that claims it must keep it — otherwise opening that application analyzes a
+    // single file instead of the application.
+    const { view } = run(
+      agentGraph([
+        {
+          slug: 'app',
+          paths: ['.'],
+          hasDetail: true,
+          evidence: [{ file: 'src/index.ts', startLine: 1, endLine: 2 }],
+        },
+      ]),
+    );
+
+    expect(view.nodes[0]!.paths).toEqual(['.']);
+    expect(view.nodes[0]!.childScope?.paths).toEqual(['.']);
   });
 
   it('falls back to the evidence files when the agent gave no usable paths', () => {

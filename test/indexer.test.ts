@@ -2,6 +2,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { appendFileSync, utimesSync } from 'node:fs';
 import { buildIndex } from '../src/server/indexer/index';
 import { listFiles } from '../src/server/indexer/files';
+import { parseJsonc } from '../src/server/indexer/tsconfig';
 import { repoSnapshot } from '../src/server/indexer/git';
 import { rootScope } from '../src/shared/graph';
 import { summarizeForAgent } from '../src/server/indexer/index';
@@ -34,6 +35,19 @@ describe('file listing', () => {
   });
 });
 
+describe('a subdirectory of a repository', () => {
+  it('indexes only that subdirectory, with paths relative to it', () => {
+    const outer = copyFixtureAsGitRepo();
+    const index = buildIndex(`${outer}/packages/core`);
+
+    expect(index.fileSource).toBe('git');
+    expect(index.name).toBe('@sample/core');
+    expect(index.files).toContain('src/math.ts');
+    expect(index.files.some((f) => f.startsWith('packages/'))).toBe(false);
+    expect(index.imports.files.find((f) => f.file === 'src/index.ts')?.internal).toEqual(['src/math.ts']);
+  });
+});
+
 describe('packages', () => {
   it('reads the root manifest, the workspace patterns and the per-package dependencies', () => {
     const index = buildIndex(copyFixture());
@@ -58,6 +72,16 @@ describe('tsconfig', () => {
     const index = buildIndex(copyFixture());
     expect(index.tsconfigs.root?.baseUrl).toBe('.');
     expect(index.tsconfigs.root?.paths).toEqual({ '@app/*': ['src/*'] });
+  });
+});
+
+describe('tsconfig parsing', () => {
+  it('strips comments and trailing commas without editing string values', () => {
+    expect(
+      parseJsonc('{\n  // a line comment\n  /* and a block */\n  "a": [1, 2, ],\n  "b": { "c": 1, },\n}'),
+    ).toEqual({ a: [1, 2], b: { c: 1 } });
+    // The trailing-comma strip used to run over the whole document, including strings.
+    expect(parseJsonc('{"glob": "src/**/*.ts, }"}')).toEqual({ glob: 'src/**/*.ts, }' });
   });
 });
 

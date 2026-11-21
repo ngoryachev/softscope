@@ -4,12 +4,12 @@
  * per opened scope, and never for a scope the user did not open (SPEC §4.4, §6.2).
  */
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { FakeSchemaAgent, indexDerivedReply } from '../src/server/agent/fake';
 import { LevelNotSupportedError, RepoSession, ScopeNotFoundError } from '../src/server/session';
 import type { FileCache } from '../src/server/cache/file-cache';
-import { agentGraph, cleanupTemps, commitAll, copyFixtureAsGitRepo, tempCache } from './helpers';
+import { agentGraph, cleanupTemps, commitAll, copyFixture, copyFixtureAsGitRepo, tempCache } from './helpers';
 
 afterAll(cleanupTemps);
 
@@ -227,6 +227,49 @@ describe('snapshot changes', () => {
     expect(agent.calls).toHaveLength(0);
     expect(response.view.nodes).toHaveLength(0);
     expect(response.issues.some((i) => i.kind === 'node-dropped')).toBe(true);
+  });
+});
+
+describe('a directory without git', () => {
+  /** The fallback path of step 1: no commit to pin a schema to, so the file list stands in. */
+  const plainSession = () => {
+    const dir = copyFixture();
+    const plainAgent = new FakeSchemaAgent({
+      replies: {
+        'L4:root': agentGraph([
+          { slug: 'app', paths: ['src'], evidence: [{ file: 'package.json', startLine: 1, endLine: 2 }] },
+        ]),
+      },
+    });
+    return { dir, plainAgent, plainSession: new RepoSession(dir, { agent: plainAgent, cache: tempCache() }) };
+  };
+
+  it('invalidates the cached schema after a file is edited', async () => {
+    const { dir, plainAgent, plainSession: s } = plainSession();
+    const first = await s.graph({ level: 'L4', scopeId: 'root' });
+
+    appendFileSync(join(dir, 'src/index.ts'), '\nexport const edited = 1;\n');
+    const second = await s.graph({ level: 'L4', scopeId: 'root' });
+
+    expect(second.view.snapshot.stateId).not.toBe(first.view.snapshot.stateId);
+    expect(second.cached).toBe(false);
+    expect(plainAgent.calls).toHaveLength(2);
+  });
+
+  it('invalidates the cached schema after a file is added', async () => {
+    const { dir, plainAgent, plainSession: s } = plainSession();
+    const first = await s.graph({ level: 'L4', scopeId: 'root' });
+
+    writeFileSync(join(dir, 'src/added.ts'), 'export const added = 1;\n');
+
+    // SPEC 9.1/9.4: a new file is a new repository state, so the state id has to move,
+    // the index has to be rebuilt and the schema may not be served as current.
+    expect(s.liveSnapshot().stateId).not.toBe(first.view.snapshot.stateId);
+    expect(s.index().files).toContain('src/added.ts');
+
+    const second = await s.graph({ level: 'L4', scopeId: 'root' });
+    expect(second.cached).toBe(false);
+    expect(plainAgent.calls).toHaveLength(2);
   });
 });
 

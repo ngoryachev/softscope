@@ -3,8 +3,8 @@
  * a filesystem walk with ignore rules otherwise. No LLM involved (SPEC §4.4).
  */
 import { spawnSync } from 'node:child_process';
-import { readdirSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { readdirSync, realpathSync } from 'node:fs';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import { isGitRepo } from './git';
 
 /** Directories a walk never descends into. Generated output and vendored code. */
@@ -113,6 +113,30 @@ export function listFiles(root: string): FileList {
     source: fromGit ? 'git' : 'walk',
     truncated: files.length > capped.length,
   };
+}
+
+/** The path with every symlink resolved, or null when it does not exist. */
+function realPathOf(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when `abs` really lives inside `root`, symlinks followed — a link committed in the
+ * repository can point outside it, which a lexical path check cannot see.
+ *
+ * A path that does not exist is accepted here: whether it is missing is a separate
+ * question from whether it escapes, and the callers report the two differently.
+ */
+export function staysInsideRepo(root: string, abs: string): boolean {
+  const realRoot = realPathOf(root);
+  const real = realPathOf(abs);
+  if (realRoot === null || real === null) return true;
+  const rel = relative(realRoot, real);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
 /** Files under any of `paths`; a path that is a file matches itself (scope filtering). */

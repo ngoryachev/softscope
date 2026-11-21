@@ -61,9 +61,18 @@ export function parseJsonc(text: string): unknown {
       i += 1;
       continue;
     }
+    if (c === '}' || c === ']') {
+      // Drop a trailing comma, which tsconfig files routinely carry. Done inside the
+      // string-aware scan, so a comma in a string value is never touched.
+      let end = out.length;
+      while (end > 0 && /\s/.test(out[end - 1]!)) end -= 1;
+      if (end > 0 && out[end - 1] === ',') out = out.slice(0, end - 1);
+      out += c;
+      continue;
+    }
     out += c;
   }
-  return JSON.parse(out.replace(/,(\s*[}\]])/g, '$1')) as unknown;
+  return JSON.parse(out) as unknown;
 }
 
 function relJoin(dir: string, target: string): string {

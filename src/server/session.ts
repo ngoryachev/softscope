@@ -23,7 +23,8 @@ import { generatableLevels, supportsLevel } from './agent/prompts';
 import type { SchemaAgent } from './agent/types';
 import type { CacheKey, FileCache } from './cache/file-cache';
 import { buildIndex, type RepoIndex } from './indexer/index';
-import { repoSnapshot, sameState } from './indexer/git';
+import { isGitRepo, repoSnapshot, sameState } from './indexer/git';
+import { listFiles } from './indexer/files';
 import { validateView } from './validation/validate';
 
 /** What the cache stores: the agent's raw reply plus the state it describes. */
@@ -61,7 +62,7 @@ export class RepoSession {
   private readonly scopes = new Map<string, ScopeRef>();
   private readonly views = new Map<string, GraphView>();
   private readonly inFlight = new Map<string, Promise<GraphResponse>>();
-  private cachedIndex: { stateId: string; index: RepoIndex } | null = null;
+  private cachedIndex: RepoIndex | null = null;
 
   constructor(
     repoPath: string,
@@ -77,15 +78,22 @@ export class RepoSession {
 
   /** The live repository state, re-read on every call: it is what `stale` compares to. */
   liveSnapshot(): Snapshot {
-    return repoSnapshot(this.repoPath, { files: this.cachedIndex?.index.files });
+    if (isGitRepo(this.repoPath)) return repoSnapshot(this.repoPath);
+    // Without git the state id is a fingerprint of the file list, so the list has to be
+    // read now rather than taken from the last index: a file added after that index
+    // would never move the state id, and the cached schema would be served as current
+    // for the rest of the session (SPEC §9.1, §9.4).
+    return repoSnapshot(this.repoPath, { files: listFiles(this.repoPath).files });
   }
 
   /** The index, rebuilt when the repository state changed. */
   index(): RepoIndex {
     const live = this.liveSnapshot();
-    if (this.cachedIndex && this.cachedIndex.stateId === live.stateId) return this.cachedIndex.index;
+    // Compared on the whole state, not just the state id: switching to another branch
+    // that points at the same commit changes what the snapshot must report.
+    if (this.cachedIndex && sameState(this.cachedIndex.snapshot, live)) return this.cachedIndex;
     const index = buildIndex(this.repoPath);
-    this.cachedIndex = { stateId: index.snapshot.stateId, index };
+    this.cachedIndex = index;
     this.scopes.set(key('L4', ROOT_SCOPE_ID), rootScope(index.name));
     return index;
   }
@@ -108,7 +116,11 @@ export class RepoSession {
     const pending = this.inFlight.get(id);
     // Two browser tabs opening the same scope must not run the agent twice.
     if (pending && !req.refresh) return pending;
-    const task = this.produce(req).finally(() => this.inFlight.delete(id));
+    // Only the task that still owns the entry clears it: a refresh replaces the pending
+    // entry, and the replaced task must not delete the replacement on its way out.
+    const task: Promise<GraphResponse> = this.produce(req).finally(() => {
+      if (this.inFlight.get(id) === task) this.inFlight.delete(id);
+    });
     this.inFlight.set(id, task);
     return task;
   }
@@ -159,7 +171,8 @@ export class RepoSession {
     return {
       view,
       cached: cached !== null,
-      stale: !sameState(view.snapshot, this.liveSnapshot()),
+      // `index.snapshot` is the live state: `index()` above rebuilt unless it matched.
+      stale: !sameState(view.snapshot, index.snapshot),
       issues,
       openable: this.openableFrom(view),
     };
@@ -220,10 +233,13 @@ function parentOfLevel(level: Level): Level | null {
 /**
  * A node id is `<level>:<scope>/<slug>`, so the scope that owns a node — and therefore
  * the view that has to be generated to reach it — is readable from the id itself.
+ *
+ * The slug is after the LAST slash: a deeper scope id embeds its own parent, so
+ * `L3:L4:root/app/sub` is owned by `L4:root/app`, not by `L4:root`.
  */
 function scopeOwnerOf(nodeIdValue: string): string | null {
   const colon = nodeIdValue.indexOf(':');
-  const slash = nodeIdValue.indexOf('/', colon + 1);
+  const slash = nodeIdValue.lastIndexOf('/');
   return colon > 0 && slash > colon ? nodeIdValue.slice(colon + 1, slash) : null;
 }
 

@@ -12,6 +12,7 @@
  */
 import { readFileSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { staysInsideRepo } from '../indexer/files';
 import type { AgentEvidence, AgentGraph } from '../../shared/agent-schema';
 import type { ValidationIssue } from '../../shared/api';
 import {
@@ -51,13 +52,24 @@ class FileFacts {
 
   constructor(private readonly repoPath: string) {}
 
-  /** The repository-relative, POSIX path of `candidate`, or null if it escapes the repo. */
-  normalize(candidate: string): string | null {
+  /**
+   * The repository-relative, POSIX path of `candidate`, or null if it escapes the repo.
+   *
+   * `allowRoot` separates the two kinds of path the agent sends. A scope path may be the
+   * repository root — `rootScope()` uses `['.']` and `filesUnder()` reads it as "every
+   * file", so an application that covers the whole repository says `.` — while a piece
+   * of evidence may not: the root is a directory and has no line range.
+   */
+  normalize(candidate: string, allowRoot = false): string | null {
     const raw = candidate.trim();
     if (raw.length === 0 || isAbsolute(raw) || /^[a-zA-Z]:[\\/]/.test(raw)) return null;
     const abs = resolve(this.repoPath, raw);
     const rel = relative(this.repoPath, abs);
-    if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return null;
+    if (rel.startsWith('..') || isAbsolute(rel)) return null;
+    // A symlink inside the repository can point outside it; the promise is that the
+    // path really lives in the analyzed repository.
+    if (!staysInsideRepo(this.repoPath, abs)) return null;
+    if (rel === '') return allowRoot ? '.' : null;
     return sep === '/' ? rel : rel.split(sep).join('/');
   }
 
@@ -125,9 +137,18 @@ export function validateView({ repoPath, scope, snapshot, raw }: ValidateOptions
   const facts = new FileFacts(repoPath);
   const issues: ValidationIssue[] = [];
 
+  // Two different slugs can sanitise to the same id ("HTTP API" and "http-api"), and
+  // they are two different nodes: giving them one id would drop the second and silently
+  // re-point its edges at the first, inventing a relation between the wrong pair.
   const idBySlug = new Map<string, string>();
+  const takenIds = new Set<string>();
   for (const node of raw.nodes) {
-    if (!idBySlug.has(node.slug)) idBySlug.set(node.slug, nodeId(scope, node.slug));
+    if (idBySlug.has(node.slug)) continue;
+    const base = nodeId(scope, node.slug);
+    let id = base;
+    for (let n = 2; takenIds.has(id); n += 1) id = `${base}-${n}`;
+    takenIds.add(id);
+    idBySlug.set(node.slug, id);
   }
 
   const nodes: GraphNode[] = [];
@@ -147,7 +168,9 @@ export function validateView({ repoPath, scope, snapshot, raw }: ValidateOptions
       });
       continue;
     }
-    const paths = [...new Set(node.paths.map((p) => facts.normalize(p)).filter((p): p is string => p !== null))];
+    const paths = [
+      ...new Set(node.paths.map((p) => facts.normalize(p, true)).filter((p): p is string => p !== null)),
+    ];
     const graphNode: GraphNode = {
       id,
       level: scope.level,

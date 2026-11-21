@@ -13,6 +13,7 @@ import { LEVELS, type Level } from '../../shared/graph';
 import { AgentError, type SchemaAgent } from '../agent/types';
 import { generatableLevels } from '../agent/prompts';
 import type { FileCache } from '../cache/file-cache';
+import { staysInsideRepo } from '../indexer/files';
 import { LevelNotSupportedError, RepoSession, ScopeNotFoundError } from '../session';
 
 export interface AppDeps {
@@ -33,12 +34,16 @@ function isLevel(value: string | undefined): value is Level {
   return value !== undefined && (LEVELS as readonly string[]).includes(value);
 }
 
-/** Resolve a repository-relative path, refusing anything that leaves the repository. */
+/**
+ * Resolve a repository-relative path, refusing anything that leaves the repository —
+ * including through a symlink inside it, which the lexical check alone cannot see.
+ */
 function safeResolve(repoPath: string, candidate: string): string | null {
   if (candidate.length === 0 || isAbsolute(candidate) || /^[a-zA-Z]:[\\/]/.test(candidate)) return null;
   const abs = resolve(repoPath, candidate);
   const rel = relative(repoPath, abs);
   if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return null;
+  if (!staysInsideRepo(repoPath, abs)) return null;
   return abs;
 }
 

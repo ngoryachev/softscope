@@ -50,13 +50,20 @@ function dirtyFingerprint(root: string, porcelain: string): string {
   return hash(parts).slice(0, 16);
 }
 
+/** How many files are stat-ed for the synthetic id; the names all count regardless. */
+const SYNTHETIC_STAT_LIMIT = 5000;
+
 /**
  * A repository without git still needs something to key the cache on, so the file list
  * with sizes and mtimes stands in for a commit. Best effort by design.
+ *
+ * Every path contributes its name, so adding or removing a file always moves the id even
+ * beyond the stat limit; sizes and mtimes — which is what catches an edit to an existing
+ * file — are read for the first `SYNTHETIC_STAT_LIMIT` entries only.
  */
 function syntheticStateId(root: string, files: string[]): string {
-  const parts: string[] = [];
-  for (const f of files.slice(0, 5000)) {
+  const parts: string[] = [`${files.length} files`, ...files];
+  for (const f of files.slice(0, SYNTHETIC_STAT_LIMIT)) {
     try {
       const st = statSync(join(root, f));
       parts.push(`${f}:${st.size}:${Math.round(st.mtimeMs)}`);
