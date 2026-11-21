@@ -75,9 +75,11 @@ function git(cwd: string, args: string[], input?: string): GitResult {
 /**
  * A patch `git apply` can place whatever the user's diff settings: explicit `a/` `b/`
  * prefixes for `-p1`, three context lines (`diff.context=0` would yield hunks that
- * `git apply` rejects without `--unidiff-zero`), no external diff driver, no colour.
+ * `git apply` rejects without `--unidiff-zero`), no external diff driver, no textconv
+ * (a `.gitattributes` `diff=<driver>` with `textconv` would emit converted text instead
+ * of the file's bytes), no colour.
  */
-const DIFF_FLAGS = ['--binary', '--no-color', '--no-ext-diff', '-U3', '--src-prefix=a/', '--dst-prefix=b/'];
+const DIFF_FLAGS = ['--binary', '--no-color', '--no-ext-diff', '--no-textconv', '-U3', '--src-prefix=a/', '--dst-prefix=b/'];
 
 /** `SOFTSCOPE_WORK_DIR`, else `~/.softscope/changes`. */
 export function defaultWorkDir(): string {
