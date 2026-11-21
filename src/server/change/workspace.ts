@@ -4,8 +4,10 @@
  * state reproduced on top — the tracked changes as a patch, the untracked files copied.
  * The agent and the checks work there; the user's files are untouched until Apply.
  *
- * After the state is reproduced everything is staged (`git add -A`), so the worktree's
- * index is the recorded base and `git diff` against it is exactly what the agent did.
+ * After the state is reproduced it is committed onto the worktree's detached HEAD (the
+ * user's branches are not touched), so the base is a real tree object: the agent's work
+ * is `git add` plus `git diff --cached HEAD`, which reports additions, deletions and
+ * modifications alike and forgets a file the agent created and later removed again.
  */
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, lstatSync, mkdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
@@ -135,9 +137,25 @@ export function createWorkspace(opts: CreateWorkspaceOptions): Workspace {
       mkdirSync(dirname(dest), { recursive: true });
       cpSync(src, dest, { dereference: false });
     }
-    // The reproduced state becomes the base: what the agent changes is `git diff`.
+    // The reproduced state becomes the base commit of the detached worktree HEAD. Only
+    // that HEAD points at it; after the worktree is removed the commit is garbage.
     const staged = git(dir, ['add', '-A']);
     if (!staged.ok) throw new WorkspaceRefusedError(`Could not record the base state: ${staged.stderr.trim()}`);
+    const committed = git(dir, [
+      '-c',
+      'user.name=SoftZoom',
+      '-c',
+      'user.email=softscope@localhost',
+      '-c',
+      'commit.gpgsign=false',
+      'commit',
+      '--quiet',
+      '--allow-empty',
+      '--no-verify',
+      '-m',
+      'softscope: base state of the change',
+    ]);
+    if (!committed.ok) throw new WorkspaceRefusedError(`Could not record the base state: ${committed.stderr.trim()}`);
 
     linkNodeModules(repoPath, dir, ['.', ...(opts.packageDirs ?? [])]);
   } catch (err) {
@@ -169,15 +187,18 @@ function linkNodeModules(repoPath: string, dir: string, packageDirs: string[]): 
 }
 
 /**
- * The patch of what the agent did: the worktree against its recorded base. New files
- * are made known with `git add -N` first so they appear as additions.
+ * The patch of what the agent did: the worktree against the recorded base commit. The
+ * index is a scratch area here — tracked changes and deletions are staged with `add -u`,
+ * new files explicitly (the linked `node_modules` never are) — and the diff is taken
+ * between HEAD and that index, so nothing stale survives from an earlier call.
  */
 export function workspaceDiff(dir: string): string {
+  git(dir, ['add', '-u']);
   const fresh = untrackedFiles(dir);
   for (let i = 0; i < fresh.length; i += 200) {
-    git(dir, ['add', '-N', '--', ...fresh.slice(i, i + 200)]);
+    git(dir, ['add', '--', ...fresh.slice(i, i + 200)]);
   }
-  const r = git(dir, ['diff', '--binary', '--no-color', '--no-ext-diff']);
+  const r = git(dir, ['diff', '--cached', '--binary', '--no-color', '--no-ext-diff', 'HEAD']);
   return r.ok ? r.stdout : '';
 }
 

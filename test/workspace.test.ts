@@ -56,6 +56,23 @@ describe('createWorkspace', () => {
     expect(existsSync(dir)).toBe(false);
     expect(gitOut(repo, ['worktree', 'list']).trim().split('\n')).toHaveLength(1);
   });
+
+  it('forgets a file that was created and removed again between two diffs, and never touches the user branch', () => {
+    const repo = copyFixtureAsGitRepo();
+    const head = gitOut(repo, ['rev-parse', 'HEAD']).trim();
+    const { dir } = createWorkspace({ repoPath: repo, id: 'tmpfile', workDir: tempWorkDir() });
+
+    writeFileSync(join(dir, 'src/util/created.ts'), 'export const c = 1;\n');
+    expect(parseUnifiedDiff(workspaceDiff(dir)).map((f) => f.path)).toEqual(['src/util/created.ts']);
+    rmSync(join(dir, 'src/util/created.ts'));
+    writeFileSync(join(dir, 'src/util/log.ts'), 'export function log() {}\n');
+    // Only the edit is left: no stale "deleted" entry for the file that never reached the base.
+    expect(parseUnifiedDiff(workspaceDiff(dir)).map((f) => [f.path, f.status])).toEqual([['src/util/log.ts', 'modified']]);
+
+    expect(gitOut(repo, ['rev-parse', 'HEAD']).trim()).toBe(head);
+    expect(gitOut(repo, ['status', '--porcelain']).trim()).toBe('');
+    removeWorkspace(repo, dir);
+  });
 });
 
 describe('checks', () => {

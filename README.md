@@ -199,8 +199,10 @@ curl -s -X POST http://127.0.0.1:4319/api/change/3f9c1a2b/discard
 `501` when the server has no change agent, `502` when the agent fails.
 
 Two things to know: `git worktree add` writes worktree metadata into your repository's
-`.git` (removed again on apply or discard; `git worktree prune` cleans up after a crash),
-and the changes live in memory — restarting the server forgets them, and a worktree left
+`.git`, and the reproduced base state is committed onto the worktree's detached HEAD —
+your branches are never touched; the metadata is removed again on apply or discard
+(`git worktree prune` cleans up after a crash) and the base commit becomes garbage that
+`git gc` collects. And the changes live in memory — restarting the server forgets them, and a worktree left
 under `~/.softscope/changes` has to be removed by hand (`git worktree prune` in the
 repository, then delete the directory). With `SOFTSCOPE_FAKE_AGENT=1` the change agent is
 faked too: it appends a comment carrying your instruction to the first selected file, so
