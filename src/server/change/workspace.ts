@@ -11,7 +11,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, lstatSync, mkdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import type { Snapshot } from '../../shared/graph';
 import { repoSnapshot } from '../indexer/git';
@@ -48,15 +48,15 @@ interface GitResult {
 /**
  * The user's git configuration must not steer the bookkeeping: their hooks are theirs
  * (a husky `prepare-commit-msg` would refuse the base commit, a `post-checkout` would run
- * in the worktree), and `diff.noprefix`/`diff.relative`/`apply.*` settings would produce
- * patches `git apply -p1` cannot place. A hooks path that does not exist disables hooks.
+ * in the worktree), and `diff.*`/`apply.*` settings would produce patches `git apply`
+ * cannot place. A hooks path that does not exist disables hooks; it lives under the
+ * user's home, not in a world-writable temp directory, so nobody else can fill it.
  */
 const GIT_OVERRIDES = [
-  `core.hooksPath=${join(tmpdir(), 'softscope-no-hooks')}`,
+  `core.hooksPath=${join(homedir(), '.softscope', 'no-hooks')}`,
   'diff.noprefix=false',
   'diff.mnemonicPrefix=false',
   'diff.relative=false',
-  'diff.external=',
   'apply.ignoreWhitespace=no',
   'commit.gpgsign=false',
 ].flatMap((kv) => ['-c', kv]);
@@ -72,8 +72,12 @@ function git(cwd: string, args: string[], input?: string): GitResult {
   return { ok: r.status === 0, stdout: r.stdout, stderr: r.stderr };
 }
 
-/** A patch `git apply` (default `-p1`) can place, whatever the user's diff settings. */
-const DIFF_FLAGS = ['--binary', '--no-color', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/'];
+/**
+ * A patch `git apply` can place whatever the user's diff settings: explicit `a/` `b/`
+ * prefixes for `-p1`, three context lines (`diff.context=0` would yield hunks that
+ * `git apply` rejects without `--unidiff-zero`), no external diff driver, no colour.
+ */
+const DIFF_FLAGS = ['--binary', '--no-color', '--no-ext-diff', '-U3', '--src-prefix=a/', '--dst-prefix=b/'];
 
 /** `SOFTSCOPE_WORK_DIR`, else `~/.softscope/changes`. */
 export function defaultWorkDir(): string {
