@@ -75,6 +75,9 @@ export function runCheck(check: CheckCommand, dir: string, opts: RunChecksOption
       env: { ...process.env, CI: process.env.CI ?? '1', FORCE_COLOR: '0', NO_COLOR: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: false,
+      // Its own process group: `npm run` does not forward signals to the script it runs,
+      // so a cancel or timeout has to reach the whole group, not just the wrapper.
+      detached: process.platform !== 'win32',
     });
     const collect = (chunk: Buffer) => {
       output += chunk.toString('utf8');
@@ -98,10 +101,18 @@ export function runCheck(check: CheckCommand, dir: string, opts: RunChecksOption
         timedOut,
       });
     };
+    const signalGroup = (signal: NodeJS.Signals) => {
+      try {
+        if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch {
+        child.kill(signal);
+      }
+    };
     const kill = () => {
-      child.kill('SIGTERM');
+      signalGroup('SIGTERM');
       setTimeout(() => {
-        if (!settled) child.kill('SIGKILL');
+        if (!settled) signalGroup('SIGKILL');
       }, 2000).unref();
     };
     const timer = setTimeout(() => {
@@ -117,6 +128,11 @@ export function runCheck(check: CheckCommand, dir: string, opts: RunChecksOption
     else opts.signal?.addEventListener('abort', onAbort, { once: true });
 
     child.on('error', (err) => finish(null, `[softscope] could not run ${check.command}: ${err.message}`));
+    // `close` waits for the pipes, which a grandchild that survived the wrapper could hold
+    // open for as long as it lives; after `exit` the output gets a moment to drain, no more.
+    child.on('exit', (code) => {
+      setTimeout(() => finish(code), 500).unref();
+    });
     child.on('close', (code) => finish(code));
   });
 }
