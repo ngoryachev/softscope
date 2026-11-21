@@ -11,8 +11,8 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import type { Level } from '../../shared/graph';
 
-/** Bump when the cached payload shape or the generation contract changes. */
-export const CACHE_VERSION = 1;
+/** Bump when the cached payload shape, the on-disk layout or the contract changes. */
+export const CACHE_VERSION = 2;
 
 export interface CacheKey {
   repoPath: string;
@@ -20,6 +20,13 @@ export interface CacheKey {
   stateId: string;
   level: Level;
   scopeId: string;
+  /**
+   * `SchemaAgent.name`. Part of the key, so each agent gets its own partition of the
+   * cache: the fake agent derives graphs from the index without reading any code, and
+   * its replies must neither be served to a session that talks to Claude nor overwrite
+   * what Claude produced for the same state — in either direction.
+   */
+  agent: string;
 }
 
 interface CacheEnvelope<T> {
@@ -75,12 +82,15 @@ export class FileCache {
 
   path(key: CacheKey): string {
     return join(
-      this.root,
-      `v${CACHE_VERSION}`,
-      `${short(resolve(key.repoPath), 12)}`,
+      this.scopeDir(key),
       key.stateId.replace(/[^a-zA-Z0-9+_-]/g, '-'),
       `${key.level}-${slug(key.scopeId)}.json`,
     );
+  }
+
+  /** Everything cached for one repository and one agent, across every state. */
+  private scopeDir(key: Omit<CacheKey, 'stateId' | 'level' | 'scopeId'>): string {
+    return join(this.root, `v${CACHE_VERSION}`, short(resolve(key.repoPath), 12), slug(key.agent));
   }
 
   get<T>(key: CacheKey): T | null {
@@ -98,6 +108,7 @@ export class FileCache {
       !k ||
       resolve(k.repoPath) !== resolve(key.repoPath) ||
       k.stateId !== key.stateId ||
+      k.agent !== key.agent ||
       k.level !== key.level ||
       k.scopeId !== key.scopeId
     ) {
@@ -118,7 +129,7 @@ export class FileCache {
     key: Omit<CacheKey, 'stateId'>,
     prefer?: { statePrefix: string },
   ): { value: T; stateId: string; storedAt: string } | null {
-    const dir = join(this.root, `v${CACHE_VERSION}`, short(resolve(key.repoPath), 12));
+    const dir = this.scopeDir(key);
     let states: string[];
     try {
       states = readdirSync(dir);
@@ -140,7 +151,8 @@ export class FileCache {
         !k ||
         resolve(k.repoPath) !== resolve(key.repoPath) ||
         k.level !== key.level ||
-        k.scopeId !== key.scopeId
+        k.scopeId !== key.scopeId ||
+        k.agent !== key.agent
       ) {
         continue;
       }
@@ -167,7 +179,7 @@ export class FileCache {
     rmSync(this.path(key), { force: true });
   }
 
-  /** Everything cached for one repository, across every commit and scope. */
+  /** Everything cached for one repository: every agent, state and scope. */
   deleteRepo(repoPath: string): void {
     rmSync(join(this.root, `v${CACHE_VERSION}`, short(resolve(repoPath), 12)), {
       recursive: true,

@@ -10,6 +10,7 @@ const baseKey = (repo: string): CacheKey => ({
   stateId: 'abc123',
   level: 'L4',
   scopeId: 'root',
+  agent: 'fake',
 });
 
 describe('cache hit and miss', () => {
@@ -32,6 +33,7 @@ describe('cache hit and miss', () => {
     expect(cache.get({ ...key, scopeId: 'L4:root/other' })).toBeNull();
     expect(cache.get({ ...key, level: 'L3' })).toBeNull();
     expect(cache.get({ ...key, repoPath: '/tmp/repo-b' })).toBeNull();
+    expect(cache.get({ ...key, agent: 'claude-agent-sdk' })).toBeNull();
     expect(cache.get(key)).toEqual({ marker: 'original' });
   });
 
@@ -82,7 +84,7 @@ describe('latest entry for a scope', () => {
     await new Promise((r) => setTimeout(r, 5));
     cache.set({ ...key, stateId: 'newer' }, { marker: 'newer' });
 
-    const latest = cache.latest<{ marker: string }>({ repoPath: key.repoPath, level: 'L4', scopeId: 'root' });
+    const latest = cache.latest<{ marker: string }>({ repoPath: key.repoPath, level: 'L4', scopeId: 'root', agent: 'fake' });
     expect(latest?.value).toEqual({ marker: 'newer' });
     expect(latest?.stateId).toBe('newer');
   });
@@ -94,7 +96,7 @@ describe('latest entry for a scope', () => {
     await new Promise((r) => setTimeout(r, 5));
     cache.set({ ...key, stateId: 'commitB' }, { marker: 'commitB' });
 
-    const scope = { repoPath: key.repoPath, level: 'L4' as const, scopeId: 'root' };
+    const scope = { repoPath: key.repoPath, level: 'L4' as const, scopeId: 'root', agent: 'fake' };
     // Checked out at commitA again with a dirty tree: the schema of commitA describes
     // the code on disk, the newer one of commitB does not.
     expect(cache.latest<{ marker: string }>(scope, { statePrefix: 'commitA' })?.value).toEqual({ marker: 'commitA' });
@@ -107,10 +109,10 @@ describe('latest entry for a scope', () => {
     const key = baseKey('/tmp/repo-a');
     cache.set({ ...key, stateId: 's1', level: 'L3', scopeId: 'L4:root/app' }, { marker: 'l3' });
 
-    expect(cache.latest({ repoPath: key.repoPath, level: 'L4', scopeId: 'root' })).toBeNull();
-    expect(cache.latest({ repoPath: '/tmp/repo-b', level: 'L3', scopeId: 'L4:root/app' })).toBeNull();
-    expect(cache.latest({ repoPath: key.repoPath, level: 'L3', scopeId: 'L4:root/other' })).toBeNull();
-    expect(cache.latest<{ marker: string }>({ repoPath: key.repoPath, level: 'L3', scopeId: 'L4:root/app' })?.value).toEqual({
+    expect(cache.latest({ repoPath: key.repoPath, level: 'L4', scopeId: 'root', agent: 'fake' })).toBeNull();
+    expect(cache.latest({ repoPath: '/tmp/repo-b', level: 'L3', scopeId: 'L4:root/app', agent: 'fake' })).toBeNull();
+    expect(cache.latest({ repoPath: key.repoPath, level: 'L3', scopeId: 'L4:root/other', agent: 'fake' })).toBeNull();
+    expect(cache.latest<{ marker: string }>({ repoPath: key.repoPath, level: 'L3', scopeId: 'L4:root/app', agent: 'fake' })?.value).toEqual({
       marker: 'l3',
     });
   });

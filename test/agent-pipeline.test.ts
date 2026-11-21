@@ -254,7 +254,7 @@ describe('snapshot changes', () => {
     expect(fresh.view.snapshot.commit).not.toBe(first.view.snapshot.commit);
     expect(agent.calls).toHaveLength(2);
     expect(
-      cache.get({ repoPath: repo, stateId: first.view.snapshot.stateId, level: 'L4', scopeId: 'root' }),
+      cache.get({ repoPath: repo, stateId: first.view.snapshot.stateId, level: 'L4', scopeId: 'root', agent: 'fake' }),
     ).not.toBeNull();
   });
 
@@ -339,8 +339,8 @@ describe('snapshot changes', () => {
       },
     ]);
     cache.set(
-      { repoPath: repo, stateId: session.liveSnapshot().stateId, level: 'L4', scopeId: 'root' },
-      { scope: { level: 'L4', id: 'root', label: 'sample-app', paths: ['.'] }, snapshot: session.liveSnapshot(), agent: 'fake', raw: stale },
+      { repoPath: repo, stateId: session.liveSnapshot().stateId, level: 'L4', scopeId: 'root', agent: 'fake' },
+      { scope: { level: 'L4', id: 'root', label: 'sample-app', paths: ['.'] }, snapshot: session.liveSnapshot(), raw: stale },
     );
 
     const response = await session.graph({ level: 'L4', scopeId: 'root' });
@@ -449,6 +449,68 @@ describe('which cached schema may be reused', () => {
     expect(fallback.cached).toBe(true);
     expect(fallback.stale).toBe(true);
     expect(fallback.view.snapshot.commit).toBe(firstCommit);
+  });
+
+  it('keeps each agent its own entry for the same state instead of overwriting', async () => {
+    // Alternating a fake session (for UI work) and a real one at the same commit must
+    // not cost a generation each time round: the two entries live side by side.
+    const scripted = new FakeSchemaAgent({ replies: { 'L4:root': l4Reply } });
+    const asClaude: SchemaAgent = { name: 'claude-agent-sdk', generate: (r) => scripted.generate(r) };
+    const fake = new FakeSchemaAgent({
+      replies: {
+        'L4:root': agentGraph([
+          { slug: 'app', title: 'from the fake', evidence: [{ file: 'package.json', startLine: 1, endLine: 1 }] },
+        ]),
+      },
+    });
+
+    await new RepoSession(repo, { agent: asClaude, cache }).graph({ level: 'L4', scopeId: 'root' });
+    await new RepoSession(repo, { agent: fake, cache }).graph({ level: 'L4', scopeId: 'root' });
+
+    const backToClaude = await new RepoSession(repo, { agent: asClaude, cache }).graph({
+      level: 'L4',
+      scopeId: 'root',
+    });
+    expect(backToClaude.cached).toBe(true);
+    expect(backToClaude.stale).toBe(false);
+    expect(backToClaude.view.nodes.map((n) => n.title)).toContain('@sample/core');
+    expect(scripted.calls).toHaveLength(1);
+
+    const backToFake = await new RepoSession(repo, { agent: fake, cache }).graph({ level: 'L4', scopeId: 'root' });
+    expect(backToFake.cached).toBe(true);
+    expect(backToFake.view.nodes.map((n) => n.title)).toEqual(['from the fake']);
+    expect(fake.calls).toHaveLength(1);
+  });
+
+  it('still falls back to its own earlier schema when another agent wrote a newer entry', async () => {
+    // Claude generated at the first commit; the fake agent (SOFTSCOPE_FAKE_AGENT) at the
+    // second; then a third commit. A Claude session has a schema of its own to show
+    // marked stale — the fake agent's newer entry must not hide it and force a paid call.
+    const scripted = new FakeSchemaAgent({ replies: { 'L4:root': l4Reply } });
+    const asClaude: SchemaAgent = { name: 'claude-agent-sdk', generate: (r) => scripted.generate(r) };
+    const first = await new RepoSession(repo, { agent: asClaude, cache }).graph({ level: 'L4', scopeId: 'root' });
+    expect(scripted.calls).toHaveLength(1);
+
+    appendFileSync(join(repo, 'packages/core/src/math.ts'), '\nexport const four = 4;\n');
+    commitAll(repo, 'second');
+    await new Promise((r) => setTimeout(r, 5));
+    const fakeReply = agentGraph([
+      { slug: 'app', title: 'from the fake', evidence: [{ file: 'package.json', startLine: 1, endLine: 1 }] },
+    ]);
+    await new RepoSession(repo, { agent: new FakeSchemaAgent({ replies: { 'L4:root': fakeReply } }), cache }).graph({
+      level: 'L4',
+      scopeId: 'root',
+    });
+
+    appendFileSync(join(repo, 'packages/core/src/math.ts'), '\nexport const five = 5;\n');
+    commitAll(repo, 'third');
+
+    const later = await new RepoSession(repo, { agent: asClaude, cache }).graph({ level: 'L4', scopeId: 'root' });
+    expect(later.view.nodes.map((n) => n.title)).not.toContain('from the fake');
+    expect(later.cached).toBe(true);
+    expect(later.stale).toBe(true);
+    expect(later.view.snapshot.commit).toBe(first.view.snapshot.commit);
+    expect(scripted.calls).toHaveLength(1);
   });
 });
 
