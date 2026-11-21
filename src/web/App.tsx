@@ -68,6 +68,8 @@ export function App() {
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [viewing, setViewing] = useState<Evidence | null>(null);
   const requestId = useRef(0);
+  /** Cancel was pressed before the server had a job for the scope; apply it once it does. */
+  const cancelWanted = useRef(false);
 
   const busy = loading !== null;
   const current = stack[stack.length - 1] ?? null;
@@ -83,7 +85,14 @@ export function App() {
   /** Loads one scope. Any in-flight load for an older request is discarded. */
   const load = useCallback(async (level: Level, scopeId: string, label: string, options: LoadOptions = {}) => {
     const id = ++requestId.current;
-    setLoading({ level, scopeId, label, startedAt: null, activity: [] });
+    // A second load of the scope that is already loading keeps what the progress
+    // stream has reported: the stream is not re-created, so it would not be replayed.
+    setLoading((prev) =>
+      prev && prev.level === level && prev.scopeId === scopeId
+        ? { ...prev, label }
+        : { level, scopeId, label, startedAt: null, activity: [] },
+    );
+    cancelWanted.current = false;
     setCancelling(false);
     setError(null);
     setNotice(null);
@@ -99,6 +108,7 @@ export function App() {
       });
       setSelectedEdgeId(null);
       setSelectedNodeId(options.selectNodeId && findNode(next.view, options.selectNodeId) ? options.selectNodeId : null);
+      setNotice(null);
     } catch (err) {
       if (id !== requestId.current) return;
       if (err instanceof GenerationCancelled) {
@@ -147,6 +157,11 @@ export function App() {
       if (closed) return;
       if (event.type === 'started') {
         setLoading((prev) => (prev ? { ...prev, startedAt: event.startedAt } : prev));
+        // Cancel was pressed while nothing was running yet; the job exists now.
+        if (cancelWanted.current) {
+          setCancelling(true);
+          void cancelGeneration(loadingLevel, loadingScopeId).catch(() => setCancelling(false));
+        }
       } else if (event.type === 'activity') {
         const entry: ProgressActivity = { tool: event.tool, detail: event.detail, at: event.at };
         setLoading((prev) => (prev ? { ...prev, activity: [...prev.activity, entry].slice(-KEPT_ACTIVITY) } : prev));
@@ -161,6 +176,9 @@ export function App() {
     };
     const connect = () => {
       if (closed) return;
+      // Every connection replays the server's buffer, so a reconnect starts from scratch
+      // rather than appending the replayed lines to the ones already shown.
+      setLoading((prev) => (prev ? { ...prev, activity: [] } : prev));
       close = subscribeProgress(loadingLevel, loadingScopeId, onEvent, onDrop);
     };
     connect();
@@ -186,11 +204,23 @@ export function App() {
 
   const handleCancel = () => {
     if (!loading) return;
+    const { level, scopeId, label } = loading;
     setCancelling(true);
-    cancelGeneration(loading.level, loading.scopeId).catch((err: unknown) => {
-      setCancelling(false);
-      setError(err instanceof Error ? err.message : String(err));
-    });
+    cancelWanted.current = true;
+    cancelGeneration(level, scopeId)
+      .then(({ cancelled }) => {
+        if (cancelled) return;
+        // No job for this scope yet: the server is still indexing, looking in the cache,
+        // or generating a parent level for a deep link. The button must not stay stuck;
+        // the intent is kept and applied when the job's `started` event arrives.
+        setCancelling(false);
+        setNotice(`Nothing is running for ${label} yet. Cancel will apply as soon as its generation starts.`);
+      })
+      .catch((err: unknown) => {
+        setCancelling(false);
+        cancelWanted.current = false;
+        setError(err instanceof Error ? err.message : String(err));
+      });
   };
 
   const openNode = (nodeId: string) => {

@@ -73,7 +73,8 @@ export class ClaudeSchemaAgent implements SchemaAgent {
     const { system, prompt } = buildPrompt(req);
     const abortController = new AbortController();
     const onAbort = () => abortController.abort();
-    req.signal?.addEventListener('abort', onAbort, { once: true });
+    if (req.signal?.aborted) onAbort();
+    else req.signal?.addEventListener('abort', onAbort, { once: true });
 
     const options: Options = {
       cwd: req.repoPath,
