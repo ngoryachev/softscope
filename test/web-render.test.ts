@@ -10,6 +10,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { App } from '../src/web/App';
 import { Breadcrumbs } from '../src/web/components/Breadcrumbs';
 import { FileViewer } from '../src/web/components/FileViewer';
+import { GenerationProgress, formatElapsed } from '../src/web/components/GenerationProgress';
 import { GraphCanvas } from '../src/web/components/GraphCanvas';
 import { Inspector } from '../src/web/components/Inspector';
 import { RepoPicker } from '../src/web/components/RepoPicker';
@@ -40,6 +41,7 @@ const view: GraphView = {
       summary: 'Serves HTTP on localhost.',
       evidence: [{ file: 'src/a.ts', startLine: 1, endLine: 3, note: 'entry point' }],
       boundary: false,
+      subsystemId: '',
       memberOf: [],
       paths: ['src'],
       childScope: l3Scope,
@@ -52,6 +54,7 @@ const view: GraphView = {
       summary: '',
       evidence: [{ file: 'src/a.ts', startLine: 2, endLine: 2 }],
       boundary: true,
+      subsystemId: '',
       memberOf: ['srv'],
       paths: [],
       childScope: null,
@@ -78,8 +81,92 @@ const state: RepoState = {
   repoName: 'demo',
   isGitRepo: true,
   snapshot,
-  generatableLevels: ['L4', 'L3'],
+  generatableLevels: ['L4', 'L3', 'L2'],
   fakeAgent: true,
+};
+
+/** An L3 view of "server" with two subsystems, and the L2 of one of them. */
+const l3View: GraphView = {
+  scope: l3Scope,
+  diagramKind: 'component-graph',
+  nodes: [
+    {
+      id: 'L3:L4:root/server/http',
+      level: 'L3',
+      kind: 'subsystem',
+      title: 'http',
+      summary: 'Routes requests.',
+      evidence: [{ file: 'src/http.ts', startLine: 1, endLine: 3 }],
+      boundary: false,
+      subsystemId: '',
+      memberOf: [],
+      paths: ['src/http.ts'],
+      childScope: { level: 'L2', id: 'L3:L4:root/server/http', label: 'http', paths: ['src/http.ts'] },
+    },
+    {
+      id: 'L3:L4:root/server/arithmetic',
+      level: 'L3',
+      kind: 'subsystem',
+      title: 'arithmetic',
+      summary: 'Adds numbers.',
+      evidence: [{ file: 'src/math.ts', startLine: 1, endLine: 3 }],
+      boundary: false,
+      subsystemId: '',
+      memberOf: [],
+      paths: ['src/math.ts'],
+      childScope: null,
+    },
+  ],
+  edges: [],
+  notes: [],
+  snapshot,
+};
+
+const l2View: GraphView = {
+  scope: { level: 'L2', id: 'L3:L4:root/server/http', label: 'http', paths: ['src/http.ts'] },
+  diagramKind: 'data-flow',
+  nodes: [
+    {
+      id: 'handler',
+      level: 'L2',
+      kind: 'function',
+      title: 'handleRequest',
+      summary: 'Parses the request and calls add.',
+      evidence: [{ file: 'src/http.ts', startLine: 1, endLine: 3 }],
+      boundary: false,
+      subsystemId: '',
+      memberOf: [],
+      paths: ['src/http.ts'],
+      childScope: null,
+    },
+    {
+      id: 'add',
+      level: 'L2',
+      kind: 'function',
+      title: 'add',
+      summary: 'Lives in the arithmetic subsystem.',
+      evidence: [{ file: 'src/math.ts', startLine: 1, endLine: 3 }],
+      boundary: true,
+      subsystemId: 'L3:L4:root/server/arithmetic',
+      memberOf: [],
+      paths: [],
+      childScope: null,
+    },
+  ],
+  edges: [
+    {
+      id: 'handler-add',
+      from: 'handler',
+      to: 'add',
+      kind: 'calls',
+      label: 'two parsed numbers',
+      evidence: [{ file: 'src/http.ts', startLine: 2, endLine: 2 }],
+      status: 'confirmed',
+      reason: '',
+    },
+  ],
+  notes: [],
+  snapshot,
 };
 
 const noop = () => undefined;
@@ -127,6 +214,91 @@ describe('screens render', () => {
     );
     expect(html).toContain('unverified relation'); // the legend explains the dashed edges
     expect(html.length).toBeGreaterThan(200);
+  });
+});
+
+describe('generation progress', () => {
+  it('shows the elapsed time, the recent agent activity and a cancel button', () => {
+    const startedAt = new Date(Date.now() - 65_000).toISOString();
+    const html = render(
+      h(GenerationProgress, {
+        level: 'L2',
+        scopeLabel: 'http',
+        startedAt,
+        activity: [
+          { tool: 'Read', detail: 'src/http.ts', at: startedAt },
+          { tool: 'Grep', detail: 'handleRequest', at: startedAt },
+        ],
+        cancelling: false,
+        onCancel: noop,
+      }),
+    );
+
+    expect(html).toContain('Analyzing L2 of http');
+    expect(html).toMatch(/1:0[56] elapsed/);
+    expect(html).toContain('src/http.ts');
+    expect(html).toContain('handleRequest');
+    expect(html).toContain('>Cancel<');
+  });
+
+  it('says it is starting until the server reports the job, and formats minutes', () => {
+    const html = render(
+      h(GenerationProgress, { level: 'L3', scopeLabel: 'server', startedAt: null, activity: [], cancelling: true, onCancel: noop }),
+    );
+    expect(html).toContain('starting');
+    expect(html).toContain('Cancelling');
+    expect(formatElapsed(0)).toBe('0:00');
+    expect(formatElapsed(125_000)).toBe('2:05');
+  });
+});
+
+describe('L2 view', () => {
+  it('explains a data-flow legend and calls a boundary node outside this area', () => {
+    const html = render(
+      h(GraphCanvas, {
+        view: l2View,
+        selectedNodeId: null,
+        selectedEdgeId: null,
+        onSelectNode: noop,
+        onSelectEdge: noop,
+        onOpenNode: noop,
+      }),
+    );
+    expect(html).toContain('arrow = data passed, label = what is passed');
+    expect(html).toContain('boundary (outside this area)');
+    expect(html).not.toContain('outside the repository');
+  });
+
+  it('offers to go to the subsystem a linked boundary node belongs to', () => {
+    const html = render(
+      h(Inspector, {
+        view: l2View,
+        parentView: l3View,
+        selectedNodeId: 'add',
+        selectedEdgeId: null,
+        onOpenEvidence: noop,
+        onOpenNode: noop,
+        onSelectNode: noop,
+        onGoToSubsystem: noop,
+      }),
+    );
+    expect(html).toContain('Go to subsystem arithmetic');
+  });
+
+  it('falls back to the id tail when the parent view is not at hand, and hides the button otherwise', () => {
+    const without = (id: string) =>
+      render(
+        h(Inspector, {
+          view: l2View,
+          selectedNodeId: id,
+          selectedEdgeId: null,
+          onOpenEvidence: noop,
+          onOpenNode: noop,
+          onSelectNode: noop,
+        }),
+      );
+    expect(without('add')).toContain('Go to subsystem arithmetic');
+    expect(without('handler')).not.toContain('Go to subsystem');
   });
 });
 

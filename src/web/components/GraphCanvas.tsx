@@ -95,6 +95,38 @@ function layout(view: GraphView): { nodes: Node[]; edges: Edge[] } {
   return { nodes, edges };
 }
 
+/**
+ * The legend reads differently per diagram kind (SPEC §5.3): in a data-flow an arrow is
+ * data moving and its label says what moves. Below L4 a boundary node may well be code of
+ * this repository that lives in another area, so the legend does not call it external.
+ */
+function Legend({ view }: { view: GraphView }) {
+  const dataFlow = view.diagramKind === 'data-flow';
+  const atTop = view.scope.level === 'L4';
+  return (
+    <div className="sz-legend">
+      <span>
+        <i className="sz-swatch sz-swatch-node" /> {atTop ? 'code of this repository' : 'code of this area'}
+      </span>
+      <span>
+        <i className="sz-swatch sz-swatch-boundary" /> {atTop ? 'boundary (outside the repository)' : 'boundary (outside this area)'}
+      </span>
+      {dataFlow ? (
+        <span>
+          <i className="sz-swatch sz-swatch-confirmed" /> arrow = data passed, label = what is passed
+        </span>
+      ) : (
+        <span>
+          <i className="sz-swatch sz-swatch-confirmed" /> confirmed relation
+        </span>
+      )}
+      <span>
+        <i className="sz-swatch sz-swatch-unverified" /> {dataFlow ? 'unverified data flow' : 'unverified relation'}
+      </span>
+    </div>
+  );
+}
+
 export function GraphCanvas({
   view,
   selectedNodeId,
@@ -144,20 +176,7 @@ export function GraphCanvas({
         <Background gap={18} color="#e3e8ef" />
         <Controls showInteractive={false} />
       </ReactFlow>
-      <div className="sz-legend">
-        <span>
-          <i className="sz-swatch sz-swatch-node" /> code of this repository
-        </span>
-        <span>
-          <i className="sz-swatch sz-swatch-boundary" /> boundary (outside the repository)
-        </span>
-        <span>
-          <i className="sz-swatch sz-swatch-confirmed" /> confirmed relation
-        </span>
-        <span>
-          <i className="sz-swatch sz-swatch-unverified" /> unverified relation
-        </span>
-      </div>
+      <Legend view={view} />
     </div>
   );
 }

@@ -13,7 +13,7 @@
 import { query, type Options, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { agentGraphJsonSchema, parseAgentGraph, type AgentGraph } from '../../shared/agent-schema';
 import { buildPrompt } from './prompts';
-import { AgentError, type GenerateRequest, type SchemaAgent } from './types';
+import { AgentError, type AgentActivity, type GenerateRequest, type SchemaAgent } from './types';
 
 /**
  * The only tools the analysis session has. Passed as `tools`, which sets the base set of
@@ -28,7 +28,30 @@ export interface ClaudeSchemaAgentOptions {
   maxTurns?: number;
   /** Hard ceiling per generation call, in USD, as reported by the SDK. */
   maxBudgetUsd?: number;
-  onProgress?: (event: { tool: string; detail: string }) => void;
+  /** Process-wide listener (the stdout log); per-request listeners come in through the request. */
+  onProgress?: (event: AgentActivity) => void;
+}
+
+/** The target of a tool call in the words a user understands: a path, a pattern. */
+export function describeToolInput(tool: string, input: unknown): string {
+  const record = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+  const str = (key: string) => (typeof record[key] === 'string' ? (record[key] as string) : '');
+  const known = (() => {
+    switch (tool) {
+      case 'Read':
+        return str('file_path') || str('path');
+      case 'Grep': {
+        const pattern = str('pattern');
+        const where = str('path');
+        return pattern && where ? `${pattern} in ${where}` : pattern;
+      }
+      case 'Glob':
+        return str('pattern');
+      default:
+        return str('file_path') || str('path') || str('pattern') || str('command');
+    }
+  })();
+  return known || JSON.stringify(input ?? {}).slice(0, 200);
 }
 
 /** JSON object embedded in a text reply, as a fallback when structured output is absent. */
@@ -50,7 +73,8 @@ export class ClaudeSchemaAgent implements SchemaAgent {
     const { system, prompt } = buildPrompt(req);
     const abortController = new AbortController();
     const onAbort = () => abortController.abort();
-    req.signal?.addEventListener('abort', onAbort, { once: true });
+    if (req.signal?.aborted) onAbort();
+    else req.signal?.addEventListener('abort', onAbort, { once: true });
 
     const options: Options = {
       cwd: req.repoPath,
@@ -73,7 +97,9 @@ export class ClaudeSchemaAgent implements SchemaAgent {
         if (message.type === 'assistant') {
           for (const block of message.message.content) {
             if (block.type === 'tool_use') {
-              this.opts.onProgress?.({ tool: block.name, detail: JSON.stringify(block.input).slice(0, 200) });
+              const event: AgentActivity = { tool: block.name, detail: describeToolInput(block.name, block.input) };
+              this.opts.onProgress?.(event);
+              req.onProgress?.(event);
             }
           }
           continue;

@@ -16,11 +16,23 @@ import {
 
 export interface InspectorProps {
   view: GraphView;
+  /** The view this one was opened from, when there is one: names the linked subsystems. */
+  parentView?: GraphView | null;
   selectedNodeId: string | null;
   selectedEdgeId: string | null;
   onOpenEvidence: (evidence: Evidence) => void;
   onOpenNode: (id: string) => void;
   onSelectNode: (id: string) => void;
+  /** A boundary node names the subsystem it belongs to; this takes the user there. */
+  onGoToSubsystem?: (subsystemId: string) => void;
+}
+
+/** The title of a sibling subsystem, or the readable tail of its id when the view is not at hand. */
+function subsystemTitle(parentView: GraphView | null | undefined, id: string): string {
+  const found = parentView ? findNode(parentView, id) : undefined;
+  if (found) return found.title;
+  const slash = id.lastIndexOf('/');
+  return slash >= 0 ? id.slice(slash + 1) : id;
 }
 
 function EvidenceList({
@@ -48,11 +60,13 @@ function EvidenceList({
 
 export function Inspector({
   view,
+  parentView,
   selectedNodeId,
   selectedEdgeId,
   onOpenEvidence,
   onOpenNode,
   onSelectNode,
+  onGoToSubsystem,
 }: InspectorProps) {
   const [showContext, setShowContext] = useState(false);
   const node = selectedNodeId ? findNode(view, selectedNodeId) : undefined;
@@ -124,6 +138,12 @@ export function Inspector({
       {node!.childScope ? (
         <button type="button" className="sz-button" onClick={() => onOpenNode(node!.id)}>
           Open {node!.childScope.level} of {node!.title}
+        </button>
+      ) : null}
+
+      {node!.boundary && node!.subsystemId ? (
+        <button type="button" className="sz-button" onClick={() => onGoToSubsystem?.(node!.subsystemId)}>
+          Go to subsystem {subsystemTitle(parentView, node!.subsystemId)}
         </button>
       ) : null}
 

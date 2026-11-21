@@ -24,6 +24,8 @@ const node = z.object({
   summary: z.string(),
   evidence: z.array(evidence),
   boundary: z.boolean(),
+  // Added for L2; replies cached before it exist and must still parse.
+  subsystemId: z.string().optional().default(''),
   memberOf: z.array(z.string()),
   paths: z.array(z.string()),
   hasDetail: z.boolean(),
@@ -120,7 +122,12 @@ export const agentGraphJsonSchema: Record<string, unknown> = strictObject({
       boundary: {
         type: 'boolean',
         description:
-          'true for something outside this repository that the code talks to: an external dependency, a database, a remote API, a runtime boundary.',
+          'true for something outside the analyzed area that the code talks to: an external dependency, a database, a remote API, a runtime boundary — or, below L4, code of this repository that belongs to another scope.',
+      },
+      subsystemId: {
+        type: 'string',
+        description:
+          'Id of the L3 subsystem this boundary entity belongs to, taken verbatim from the sibling list in the task. Empty string if unknown or if this is not a boundary node.',
       },
       memberOf: {
         type: 'array',

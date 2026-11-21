@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { validateView } from '../src/server/validation/validate';
+import { parseAgentGraph } from '../src/shared/agent-schema';
 import { repoSnapshot } from '../src/server/indexer/git';
 import { rootScope, type ScopeRef, type Snapshot } from '../src/shared/graph';
 import { agentGraph, cleanupTemps, copyFixture } from './helpers';
@@ -12,6 +13,7 @@ let repo: string;
 let snapshot: Snapshot;
 const scope: ScopeRef = rootScope('sample-app');
 const l3Scope: ScopeRef = { level: 'L3', id: 'L4:root/app', label: 'app', paths: ['src'] };
+const l2Scope: ScopeRef = { level: 'L2', id: 'L3:L4:root/app/http', label: 'http', paths: ['src/server'] };
 
 beforeAll(() => {
   repo = copyFixture();
@@ -288,6 +290,73 @@ describe('membership', () => {
 
     expect(view.nodes.find((n) => n.id.endsWith('/log'))?.memberOf).toEqual([]);
     expect(issues.filter((i) => i.kind === 'member-dropped')).toHaveLength(2);
+  });
+});
+
+describe('boundary nodes linked to a subsystem', () => {
+  const siblings = ['L3:L4:root/app/cli', 'L3:L4:root/app/logging'];
+  const reply = (subsystemId: string, boundary = true) =>
+    agentGraph([
+      { slug: 'handler', evidence: [{ file: 'src/server/http.ts', startLine: 1, endLine: 1 }] },
+      { slug: 'log', boundary, subsystemId, evidence: [{ file: 'src/util/log.ts', startLine: 1, endLine: 1 }] },
+    ]);
+
+  it('keeps a link to one of the known sibling subsystems', () => {
+    const { view, issues } = validateView({
+      repoPath: repo,
+      scope: l2Scope,
+      snapshot,
+      raw: reply('L3:L4:root/app/logging'),
+      subsystemIds: siblings,
+    });
+
+    expect(view.nodes.find((n) => n.id.endsWith('/log'))?.subsystemId).toBe('L3:L4:root/app/logging');
+    expect(view.nodes.find((n) => n.id.endsWith('/handler'))?.subsystemId).toBe('');
+    expect(issues).toHaveLength(0);
+  });
+
+  it('drops a link to a subsystem that is not a sibling and reports it', () => {
+    const { view, issues } = validateView({
+      repoPath: repo,
+      scope: l2Scope,
+      snapshot,
+      raw: reply('L3:L4:root/app/invented'),
+      subsystemIds: siblings,
+    });
+
+    expect(view.nodes.find((n) => n.id.endsWith('/log'))?.subsystemId).toBe('');
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ kind: 'subsystem-link-dropped', nodeId: 'L2:L3:L4:root/app/http/log' });
+  });
+
+  it('drops a link on a node that is not a boundary node', () => {
+    const { view, issues } = validateView({
+      repoPath: repo,
+      scope: l2Scope,
+      snapshot,
+      raw: reply('L3:L4:root/app/logging', false),
+      subsystemIds: siblings,
+    });
+
+    expect(view.nodes.find((n) => n.id.endsWith('/log'))?.subsystemId).toBe('');
+    expect(issues.map((i) => i.kind)).toEqual(['subsystem-link-dropped']);
+  });
+
+  it('drops every link when no sibling ids were given (an L4 or L3 reply)', () => {
+    const { view, issues } = run(reply('L3:L4:root/app/logging'));
+    expect(view.nodes.find((n) => n.id.endsWith('/log'))?.subsystemId).toBe('');
+    expect(issues.map((i) => i.kind)).toEqual(['subsystem-link-dropped']);
+  });
+
+  it('parses a reply cached before the field existed', () => {
+    // No cache version bump: an older reply without subsystemId must still parse, with
+    // the field defaulting to "no link".
+    const older = agentGraph([{ slug: 'a', evidence: [{ file: 'src/index.ts', startLine: 1, endLine: 1 }] }]);
+    const { subsystemId: _dropped, ...withoutField } = older.nodes[0]!;
+    const parsed = parseAgentGraph({ ...older, nodes: [withoutField] });
+    expect(parsed.nodes[0]!.subsystemId).toBe('');
+    const { view } = run(parsed);
+    expect(view.nodes[0]!.subsystemId).toBe('');
   });
 });
 

@@ -10,11 +10,20 @@ Product concept and scope: [`docs/SPEC.md`](docs/SPEC.md). The repository name i
 
 ## What works today
 
-This is step 1 of 5 of the product cycle — **Explore** (SPEC §6.1):
+Steps 1 and 2 of 5 of the product cycle — **Explore** and **Zoom** (SPEC §6.1, §6.2):
 
 - **L4** — the applications, packages and runtime boundaries of the repository.
 - **L3** — the subsystems of one application, generated **when you open it** and not
   before; opening one application never analyzes its neighbours (SPEC §4.4, §6.2).
+- **L2** — the entities of one subsystem: classes, services, functions, state modules,
+  key types, and the calls, imports, data and events between them. Generated when you
+  open the subsystem, from its own files and their direct imports only. The agent picks
+  a component graph or a data-flow diagram, whichever explains the subsystem better
+  (SPEC §5.3). An entity of a neighbouring subsystem that the code reaches appears as a
+  **boundary node linked to its subsystem** — one click takes you there — and an entity
+  shared with a neighbouring subsystem is listed as a member of both rather than drawn
+  twice (SPEC §5.1).
+- Breadcrumbs L4 → L3 → L2; going back up is served from memory, not regenerated.
 - Clicking a node shows what it is, which subsystems it belongs to, and its code links;
   a link opens the file with the evidence lines highlighted.
 - Relations the agent could not confirm in the code are drawn as **unverified** rather
@@ -28,9 +37,9 @@ This is step 1 of 5 of the product cycle — **Explore** (SPEC §6.1):
   the wait and the tokens by pressing **Regenerate**. The agent is part of the key, so
   the fake agent below never shares entries with Claude.
 
-Not built yet: Zoom to L2/L1, selection-driven prompting, AI changes and verification.
-The graph model, the agent interface and the cache are shaped for them — a new level is
-a prompt builder registered in `src/server/agent/prompts.ts`, and
+Not built yet (steps 3–5): selection-driven prompting, AI changes with verification, and
+L1 behaviour views. The graph model, the agent interface and the cache are shaped for
+them — a new level is a prompt builder registered in `src/server/agent/prompts.ts`, and
 `buildSelectionContext()` in `src/shared/graph.ts` already turns a selection into the
 structured context a change agent needs (SPEC §8.4).
 
@@ -65,8 +74,12 @@ The UI is built first, the server starts on `127.0.0.1:4319` (localhost only —
 your files and uses your Claude login), and the browser opens. The path is optional; you
 can also type it into the UI.
 
-Generating L4 for a medium repository takes roughly a minute and costs tokens against
-your subscription. The result is cached, so the second visit is instant.
+Generating a level for a medium repository takes roughly a minute and costs tokens
+against your subscription. While the agent works, the UI shows how long it has been
+running and what it is reading right now (the files it opens, the patterns it searches
+for), and a **Cancel** button stops it: nothing is cached for a cancelled generation and
+the previous view stays on screen. The result of a finished generation is cached, so the
+second visit is instant.
 
 ### Development
 

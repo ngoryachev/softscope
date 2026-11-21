@@ -53,8 +53,17 @@ export interface GraphNode {
   /** One or two sentences: what this is, as implemented. */
   summary: string;
   evidence: Evidence[];
-  /** A significant dependency or runtime boundary rather than code of this repository. */
+  /**
+   * Something outside this area that the code talks to: at L4 a dependency or runtime
+   * boundary, at L3/L2 possibly code of this repository that lives in another scope.
+   */
   boundary: boolean;
+  /**
+   * For a boundary node at L2: the id of the L3 subsystem (a sibling of the opened one)
+   * this entity belongs to, so the UI can jump there. Empty when unknown or not a
+   * boundary node.
+   */
+  subsystemId: string;
   /** Ids of the nodes this one belongs to. Several entries are normal (SPEC §5.1). */
   memberOf: string[];
   /** Files and directories that make up the node; the scope of the next level down. */
@@ -140,6 +149,26 @@ export function childScopeOf(node: GraphNode): ScopeRef | null {
   const level = nextLevel(node.level);
   if (!level || node.boundary || node.paths.length === 0) return null;
   return { level, id: node.id, label: node.title, paths: [...node.paths] };
+}
+
+/**
+ * A node id is `<level>:<scope>/<slug>`, so the scope that owns a node — and therefore
+ * the view that has to be generated to reach it — is readable from the id itself.
+ *
+ * The slug is after the LAST slash: a deeper scope id embeds its own parent, so
+ * `L3:L4:root/app/sub` is owned by `L4:root/app`, not by `L4:root`.
+ */
+export function scopeOwnerOf(nodeIdValue: string): string | null {
+  const colon = nodeIdValue.indexOf(':');
+  const slash = nodeIdValue.lastIndexOf('/');
+  return colon > 0 && slash > colon ? nodeIdValue.slice(colon + 1, slash) : null;
+}
+
+/** The level encoded at the front of a node id (`L3:...`), or null for a malformed id. */
+export function levelOfNodeId(nodeIdValue: string): Level | null {
+  const colon = nodeIdValue.indexOf(':');
+  const prefix = colon > 0 ? nodeIdValue.slice(0, colon) : '';
+  return (LEVELS as readonly string[]).includes(prefix) ? (prefix as Level) : null;
 }
 
 export function findNode(view: GraphView, id: string): GraphNode | undefined {

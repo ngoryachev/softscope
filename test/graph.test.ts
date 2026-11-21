@@ -7,10 +7,12 @@ import {
 import {
   buildSelectionContext,
   childScopeOf,
+  levelOfNodeId,
   membersOf,
   nextLevel,
   nodeId,
   rootScope,
+  scopeOwnerOf,
   subsystemsOf,
   type GraphEdge,
   type GraphNode,
@@ -36,6 +38,7 @@ function node(id: string, over: Partial<GraphNode> = {}): GraphNode {
     summary: '',
     evidence: [{ file: `${id}.ts`, startLine: 1, endLine: 2 }],
     boundary: false,
+    subsystemId: '',
     memberOf: [],
     paths: [`${id}.ts`],
     childScope: null,
@@ -142,6 +145,18 @@ describe('selection context (SPEC 8.4)', () => {
   });
 });
 
+describe('node ids', () => {
+  it('reads the owning scope and the level out of a nested node id', () => {
+    // The UI finds the parent view of an L2 boundary node's subsystem from the id alone.
+    expect(scopeOwnerOf('L3:L4:root/core/math')).toBe('L4:root/core');
+    expect(scopeOwnerOf('L4:root/core')).toBe('root');
+    expect(scopeOwnerOf('root')).toBeNull();
+    expect(levelOfNodeId('L3:L4:root/core/math')).toBe('L3');
+    expect(levelOfNodeId('L4:root/core')).toBe('L4');
+    expect(levelOfNodeId('nope')).toBeNull();
+  });
+});
+
 describe('agent reply contract', () => {
   const sample: AgentGraph = {
     diagramKind: 'component-graph',
@@ -154,6 +169,7 @@ describe('agent reply contract', () => {
         summary: 'Serves HTTP.',
         evidence: [{ file: 'src/index.ts', startLine: 1, endLine: 10, note: 'entry point' }],
         boundary: false,
+        subsystemId: '',
         memberOf: [],
         paths: ['src'],
         hasDetail: true,

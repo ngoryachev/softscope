@@ -24,7 +24,8 @@ export interface ValidationIssue {
     | 'node-dropped'
     | 'edge-dropped'
     | 'edge-unverified'
-    | 'member-dropped';
+    | 'member-dropped'
+    | 'subsystem-link-dropped';
   message: string;
   nodeId?: string;
   edgeId?: string;
@@ -41,6 +42,24 @@ export interface GraphResponse {
   issues: ValidationIssue[];
   /** Scopes reachable from this view, so the UI knows what can be opened. */
   openable: ScopeRef[];
+}
+
+/**
+ * What a running generation reports while the user waits (served as SSE from
+ * `/api/graph/progress`). Elapsed time is computed by the UI from `startedAt`.
+ */
+export type ProgressEvent =
+  | { type: 'started'; level: Level; scopeId: string; startedAt: string }
+  | { type: 'activity'; tool: string; detail: string; at: string }
+  | { type: 'done'; level: Level; scopeId: string; at: string }
+  | { type: 'error'; level: Level; scopeId: string; at: string; message: string }
+  | { type: 'cancelled'; level: Level; scopeId: string; at: string }
+  /** No generation is running for that scope. */
+  | { type: 'idle'; level: Level; scopeId: string };
+
+export interface CancelRequest {
+  level: Level;
+  scopeId: string;
 }
 
 export interface FileResponse {
