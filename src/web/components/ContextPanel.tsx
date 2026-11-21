@@ -7,7 +7,7 @@
  * The context is computed here with the same `buildSelectionContext` the server uses
  * for `POST /api/context`, over every view loaded since the repository was opened.
  */
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import {
   buildSelectionContext,
   findNode,
@@ -34,6 +34,7 @@ export interface ContextPanelProps {
   onClear: () => void;
   onExpand: (direction: ExpandDirection) => void;
   onOpenEvidence: (evidence: Evidence) => void;
+  /** Show the item in the inspector, navigating to its view when that is another one. */
   onFocus: (item: SelectableRef) => void;
 }
 
@@ -50,7 +51,7 @@ interface BasketItem extends SelectableRef {
 const COPIED_MS = 1500;
 
 /** The view an id belongs to among the loaded ones: by the id's own naming, else by search. */
-function ownerView(views: GraphView[], item: SelectableRef): GraphView | undefined {
+export function ownerView(views: GraphView[], item: SelectableRef): GraphView | undefined {
   const key = viewKeyOfId(item.id);
   if (key) return views.find((v) => viewKey(v.scope.level, v.scope.id) === viewKey(key.level, key.scopeId));
   return views.find((v) =>
@@ -132,17 +133,24 @@ export function ContextPanel({
 
   const nodeIds = [...basket.nodeIds];
   const edgeIds = [...basket.edgeIds];
-  // Keyed by content, not by Set identity: a new Set with the same ids must not recompute.
+  // Keyed by content, not by identity: a new Set with the same ids, or the fresh snapshot
+  // object every poll tick delivers, must not recompute the context.
   const nodeKey = nodeIds.join('\n');
   const edgeKey = edgeIds.join('\n');
+  const liveKey = live ? `${live.stateId}@${live.branch}` : '';
+  const liveRef = useRef(live);
+  liveRef.current = live;
   const context = useMemo(
-    () =>
-      buildSelectionContext(
+    () => {
+      const current = liveRef.current;
+      return buildSelectionContext(
         views,
         { nodeIds: nodeKey ? nodeKey.split('\n') : [], edgeIds: edgeKey ? edgeKey.split('\n') : [] },
-        live ? { live } : {},
-      ),
-    [views, live, nodeKey, edgeKey],
+        current ? { live: current } : {},
+      );
+    },
+    // liveKey stands for the live snapshot: see above.
+    [views, liveKey, nodeKey, edgeKey],
   );
 
   const items: BasketItem[] = [
@@ -221,7 +229,13 @@ export function ContextPanel({
           <ul className="sz-basket">
             {g.items.map((item) => (
               <li key={`${item.kind}:${item.id}`} className={`sz-basket-item${item.resolved ? '' : ' sz-basket-unresolved'}`}>
-                <button type="button" className="sz-link sz-basket-title" onClick={() => onFocus(item)}>
+                <button
+                  type="button"
+                  className="sz-link sz-basket-title"
+                  disabled={!item.resolved}
+                  title={item.resolved ? 'Show in its view' : undefined}
+                  onClick={() => onFocus(item)}
+                >
                   {item.title}
                 </button>
                 <span className="sz-muted sz-basket-detail">{item.detail}</span>

@@ -32,7 +32,7 @@ import { cancelGeneration, GenerationCancelled, getGraph, getSnapshot, getState,
 import { Breadcrumbs } from './components/Breadcrumbs';
 import { FileViewer } from './components/FileViewer';
 import { GenerationProgress, type ProgressActivity } from './components/GenerationProgress';
-import { ContextPanel } from './components/ContextPanel';
+import { ContextPanel, ownerView } from './components/ContextPanel';
 import { GraphCanvas, type Basket, type SelectableRef } from './components/GraphCanvas';
 import { Inspector } from './components/Inspector';
 import { RepoPicker } from './components/RepoPicker';
@@ -61,19 +61,22 @@ interface LoadOptions {
   refresh?: boolean;
   /** Select this node once the view is shown (used when jumping to a subsystem's own view). */
   selectNodeId?: string;
+  /** Only focus this item once the view is shown; the basket is left alone. */
+  focus?: SelectableRef;
 }
 
 const depthOf = (level: Level) => LEVELS.indexOf(level);
 
 const EMPTY_BASKET: Basket = { nodeIds: new Set(), edgeIds: new Set() };
 
+const hasItem = (view: GraphView, item: SelectableRef): boolean =>
+  item.kind === 'node' ? findNode(view, item.id) !== undefined : view.edges.some((e) => e.id === item.id);
+
 /** The level an item was picked on, from its id; `view` answers for ids in no known form. */
 function levelOfItem(item: SelectableRef, view: GraphView | null): Level | null {
   const parsed = viewKeyOfId(item.id)?.level;
   if (parsed) return parsed;
-  if (!view) return null;
-  const inView = item.kind === 'node' ? findNode(view, item.id) !== undefined : view.edges.some((e) => e.id === item.id);
-  return inView ? view.scope.level : null;
+  return view && hasItem(view, item) ? view.scope.level : null;
 }
 
 export function App() {
@@ -89,10 +92,14 @@ export function App() {
   const [focused, setFocused] = useState<SelectableRef | null>(null);
   /** Every view loaded since the repository was opened, by `level:scope` — the context is built over these. */
   const [views, setViews] = useState<Map<string, GraphView>>(() => new Map());
-  // A stable array, so the ContextPanel does not rebuild the context on every poll tick.
+  // A stable array, so an unrelated re-render does not hand the ContextPanel a new `views`.
   const loadedViews = useMemo(() => [...views.values()], [views]);
   const [viewing, setViewing] = useState<Evidence | null>(null);
   const requestId = useRef(0);
+  const basketRef = useRef(basket);
+  basketRef.current = basket;
+  /** The basket before the last click, so a double-click (open) can undo the click that preceded it. */
+  const basketBeforeClick = useRef<Basket | null>(null);
   /** Cancel was pressed before the server had a job for the scope; apply it once it does. */
   const cancelWanted = useRef(false);
 
@@ -107,6 +114,7 @@ export function App() {
   /** A plain click: this level's part of the basket becomes the item, which is focused. */
   const selectReplace = useCallback((item: SelectableRef, view: GraphView | null) => {
     const level = view?.scope.level ?? levelOfItem(item, view);
+    basketBeforeClick.current = basketRef.current;
     setBasket((prev) => {
       const keep = (kind: SelectableRef['kind'], ids: ReadonlySet<string>) =>
         new Set([...ids].filter((id) => levelOfItem({ kind, id }, view) !== level));
@@ -126,6 +134,7 @@ export function App() {
     const set = item.kind === 'node' ? nodeIds : edgeIds;
     if (inBasket) set.delete(item.id);
     else set.add(item.id);
+    basketBeforeClick.current = basket;
     setBasket({ nodeIds, edgeIds });
     setFocused(inBasket ? (focused?.kind === item.kind && focused.id === item.id ? null : focused) : item);
   };
@@ -193,6 +202,8 @@ export function App() {
       setViews((prev) => new Map(prev).set(viewKey(next.view.scope.level, next.view.scope.id), next.view));
       if (options.selectNodeId && findNode(next.view, options.selectNodeId)) {
         selectReplace({ kind: 'node', id: options.selectNodeId }, next.view);
+      } else if (options.focus && hasItem(next.view, options.focus)) {
+        setFocused(options.focus);
       } else {
         setFocused(null);
       }
@@ -315,11 +326,30 @@ export function App() {
       });
   };
 
-  const openNode = (nodeId: string) => {
+  /**
+   * Opens a node one level deeper. A double-click on the canvas arrives after its first
+   * click has already applied the plain-click rule; `undoClick` puts the basket back, so
+   * drilling down does not throw away what was selected on this level.
+   */
+  const openNode = (nodeId: string, options: { undoClick?: boolean } = {}) => {
     if (!response) return;
     const node = findNode(response.view, nodeId);
     if (!node?.childScope) return;
+    if (options.undoClick && basketBeforeClick.current) {
+      setBasket(basketBeforeClick.current);
+      basketBeforeClick.current = null;
+    }
     void load(node.childScope.level, node.childScope.id, node.childScope.label);
+  };
+
+  /** A basket item clicked in the ContextPanel: inspect it, in its own view when that is another one. */
+  const focusItem = (item: SelectableRef) => {
+    if (currentView && hasItem(currentView, item)) {
+      setFocused(item);
+      return;
+    }
+    const owner = ownerView(loadedViews, item);
+    if (owner) void load(owner.scope.level, owner.scope.id, owner.scope.label, { focus: item });
   };
 
   /**
@@ -405,7 +435,7 @@ export function App() {
               onSelect={(item, { toggle }) => (toggle ? selectToggle(item) : selectReplace(item, response.view))}
               onMarquee={addNodes}
               onClearFocus={() => setFocused(null)}
-              onOpenNode={openNode}
+              onOpenNode={(id) => openNode(id, { undoClick: true })}
             />
             <div className="sz-side">
               <Inspector
@@ -426,7 +456,7 @@ export function App() {
                 onClear={clearBasket}
                 onExpand={expand}
                 onOpenEvidence={setViewing}
-                onFocus={setFocused}
+                onFocus={focusItem}
               />
             </div>
           </>

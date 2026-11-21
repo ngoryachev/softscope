@@ -22,7 +22,7 @@
  * semantics (replace or toggle), so that path would re-add a node the user just
  * Shift+clicked out of the basket.
  */
-import { useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import dagre from '@dagrejs/dagre';
 import {
   Background,
@@ -188,6 +188,9 @@ export function GraphCanvas({ view, basket, focused, onSelect, onMarquee, onClea
   basketRef.current = basket;
   /** A selection rectangle is being drawn: `select` changes arriving now are the marquee. */
   const marquee = useRef(false);
+  // The latest local nodes, for the reconciliation at the end of a marquee.
+  const nodesRef = useRef(nodes);
+  nodesRef.current = nodes;
 
   useEffect(() => {
     const b = basketRef.current;
@@ -196,29 +199,36 @@ export function GraphCanvas({ view, basket, focused, onSelect, onMarquee, onClea
   }, [layouted, setNodes, setEdges]);
 
   // One-way mirror of the basket into React Flow's own selection flags, so that a
-  // Shift+click on a basket node reads as a deselect there too.
+  // Shift+click on a basket node reads as a deselect there too. Not while a rectangle is
+  // being drawn: React Flow's selection is read at its end, and must stay its own until then.
+  const mirror = useCallback(
+    (b: Basket, extraNodeIds: ReadonlySet<string> = new Set()) => {
+      setNodes((prev) => {
+        let changed = false;
+        const next = prev.map((n) => {
+          const selected = b.nodeIds.has(n.id) || extraNodeIds.has(n.id);
+          if ((n.selected ?? false) === selected) return n;
+          changed = true;
+          return { ...n, selected };
+        });
+        return changed ? next : prev;
+      });
+      setEdges((prev) => {
+        let changed = false;
+        const next = prev.map((e) => {
+          const selected = b.edgeIds.has(e.id);
+          if ((e.selected ?? false) === selected) return e;
+          changed = true;
+          return { ...e, selected };
+        });
+        return changed ? next : prev;
+      });
+    },
+    [setNodes, setEdges],
+  );
   useEffect(() => {
-    setNodes((prev) => {
-      let changed = false;
-      const next = prev.map((n) => {
-        const selected = basket.nodeIds.has(n.id);
-        if ((n.selected ?? false) === selected) return n;
-        changed = true;
-        return { ...n, selected };
-      });
-      return changed ? next : prev;
-    });
-    setEdges((prev) => {
-      let changed = false;
-      const next = prev.map((e) => {
-        const selected = basket.edgeIds.has(e.id);
-        if ((e.selected ?? false) === selected) return e;
-        changed = true;
-        return { ...e, selected };
-      });
-      return changed ? next : prev;
-    });
-  }, [basket, setNodes, setEdges]);
+    if (!marquee.current) mirror(basket);
+  }, [basket, mirror]);
 
   const decorated = nodes.map((n) => {
     const inBasket = basket.nodeIds.has(n.id);
@@ -244,6 +254,9 @@ export function GraphCanvas({ view, basket, focused, onSelect, onMarquee, onClea
   // cleared here rather than left on until the next rectangle.
   const handleNodeClick: NodeMouseHandler = (event, node) => {
     marquee.current = false;
+    // The second click of a double-click: the first one already applied the click rule, and
+    // the double-click itself (onNodeDoubleClick) undoes that rule and opens the node.
+    if (event.detail > 1) return;
     onSelect({ kind: 'node', id: node.id }, { toggle: isToggle(event) });
   };
   const handleEdgeClick: EdgeMouseHandler = (event, edge) => {
@@ -254,6 +267,9 @@ export function GraphCanvas({ view, basket, focused, onSelect, onMarquee, onClea
     marquee.current = false;
     onClearFocus();
   };
+  // Until React Flow has measured a node it treats it as inside any rectangle, so a marquee
+  // drawn right after a view appears would take every node. Only measured nodes count.
+  const measuredIn = (list: Node[]) => new Set(list.filter((n) => n.measured?.width).map((n) => n.id));
   // React Flow dispatches the rectangle's `select` changes synchronously while the pointer
   // moves, so every one of them arrives while `marquee` is set. Nodes only: the rectangle
   // also selects the edges between covered nodes, which is not what the user drew —
@@ -261,8 +277,22 @@ export function GraphCanvas({ view, basket, focused, onSelect, onMarquee, onClea
   const handleNodesChange: OnNodesChange<Node> = (changes) => {
     onNodesChange(changes);
     if (!marquee.current) return;
-    const ids = changes.flatMap((c) => (c.type === 'select' && c.selected && !basket.nodeIds.has(c.id) ? [c.id] : []));
+    const measured = measuredIn(nodes);
+    const ids = changes.flatMap((c) =>
+      c.type === 'select' && c.selected && measured.has(c.id) && !basket.nodeIds.has(c.id) ? [c.id] : [],
+    );
     if (ids.length > 0) onMarquee(ids);
+  };
+  // A node measured only while the rectangle was already over it got its `select` change
+  // before it counted; what React Flow holds selected at the end settles it.
+  const handleSelectionEnd = () => {
+    marquee.current = false;
+    const measured = measuredIn(nodesRef.current);
+    const ids = nodesRef.current
+      .filter((n) => n.selected && measured.has(n.id) && !basket.nodeIds.has(n.id))
+      .map((n) => n.id);
+    if (ids.length > 0) onMarquee(ids);
+    mirror(basket, new Set(ids));
   };
 
   return (
@@ -279,9 +309,7 @@ export function GraphCanvas({ view, basket, focused, onSelect, onMarquee, onClea
         onSelectionStart={() => {
           marquee.current = true;
         }}
-        onSelectionEnd={() => {
-          marquee.current = false;
-        }}
+        onSelectionEnd={handleSelectionEnd}
         selectionOnDrag
         selectionMode={SelectionMode.Partial}
         selectNodesOnDrag={false}

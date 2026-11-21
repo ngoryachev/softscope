@@ -245,6 +245,15 @@ pre {
   border: 1px dashed var(--accent);
 }
 
+/*
+ * React Flow draws a group-selection rectangle over the selected nodes once a marquee
+ * ends, and it catches every click until the pane is clicked. The basket is the
+ * selection here, so the rectangle has no job and must not swallow clicks.
+ */
+.react-flow__nodesselection-rect {
+  display: none;
+}
+
 .sz-inspector {
   border-left: 1px solid var(--border);
   background: var(--panel);
