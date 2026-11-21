@@ -125,9 +125,14 @@ interface ChangeRecord {
   error?: string;
   startedAt: string;
   finishedAt: string | null;
+  /** The agent run in progress, so discard can wait for it to stop before removing the worktree. */
+  run: Promise<void> | null;
 }
 
 const OPEN_STATES: ReadonlySet<ChangeState> = new Set(['running', 'done', 'failed', 'cancelled']);
+
+/** How long discard waits for an aborted agent to stop before removing its worktree anyway. */
+const DISCARD_GRACE_MS = 5000;
 
 export class ChangeManager {
   private readonly changes = new Map<string, ChangeRecord>();
@@ -190,9 +195,10 @@ export class ChangeManager {
       checks: [],
       startedAt: now,
       finishedAt: null,
+      run: null,
     };
     this.changes.set(id, record);
-    void this.runAgent(record, task);
+    record.run = this.runAgent(record, task);
     return { id };
   }
 
@@ -221,7 +227,7 @@ export class ChangeManager {
     record.status = 'running';
     delete record.error;
     record.finishedAt = null;
-    void this.runAgent(record, trimmed);
+    record.run = this.runAgent(record, trimmed);
   }
 
   /**
@@ -265,11 +271,16 @@ export class ChangeManager {
     };
   }
 
-  /** Removes the worktree; a running agent is aborted first. No trace is left. */
-  discard(id: string): void {
+  /**
+   * Removes the worktree; a running agent is aborted first and given a moment to stop, so
+   * an in-flight edit cannot recreate the directory after it was removed. No trace is left.
+   */
+  async discard(id: string): Promise<void> {
     const record = this.get(id);
     if (!OPEN_STATES.has(record.status)) throw new ChangeStateError(`The change was already ${record.status}.`);
-    this.jobs.cancel(id);
+    if (this.jobs.cancel(id) && record.run) {
+      await Promise.race([record.run, new Promise<void>((resolve) => setTimeout(resolve, DISCARD_GRACE_MS))]);
+    }
     removeWorkspace(this.host.repoPath, record.workspaceDir);
     record.status = 'discarded';
     record.finishedAt = new Date().toISOString();
@@ -289,6 +300,8 @@ export class ChangeManager {
     const entry: ChangeHistoryEntry = { task, startedAt: job.startedAt, finishedAt: null, result: null };
     record.history.push(entry);
     const previous = record.result;
+    // The previous run's results describe an older diff; they are not shown next to the new one.
+    record.checks = [];
     const at = () => new Date().toISOString();
     const activity = (tool: string, detail: string) => this.jobs.emit(job, { type: 'activity', tool, detail, at: at() });
 

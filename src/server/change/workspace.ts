@@ -102,6 +102,9 @@ function untrackedFiles(repoPath: string): string[] {
   return r.stdout
     .split('\0')
     .filter((p) => p.length > 0)
+    // A nested repository (a clone dropped into the tree, not added) is listed as
+    // `dir/`: it is not part of this repository and cannot travel in a patch; skip it.
+    .filter((p) => !p.endsWith('/'))
     // Dependencies are linked, not copied, whatever the repository's ignore rules say.
     .filter((p) => !p.split('/').includes('node_modules'));
 }

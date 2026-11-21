@@ -73,6 +73,21 @@ describe('createWorkspace', () => {
     expect(gitOut(repo, ['status', '--porcelain']).trim()).toBe('');
     removeWorkspace(repo, dir);
   });
+
+  it('skips an untracked nested repository instead of failing on it', () => {
+    const repo = copyFixtureAsGitRepo();
+    mkdirSync(join(repo, 'vendor-clone'));
+    spawnSync('git', ['init', '--quiet'], { cwd: join(repo, 'vendor-clone') });
+    writeFileSync(join(repo, 'vendor-clone/readme.txt'), 'not part of this repository\n');
+    writeFileSync(join(repo, 'src/extra.ts'), 'export const extra = 1;\n');
+    expect(gitOut(repo, ['ls-files', '--others', '--exclude-standard'])).toContain('vendor-clone/');
+
+    const { dir } = createWorkspace({ repoPath: repo, id: 'nested', workDir: tempWorkDir() });
+    expect(existsSync(join(dir, 'src/extra.ts'))).toBe(true);
+    expect(existsSync(join(dir, 'vendor-clone'))).toBe(false);
+    expect(workspaceDiff(dir)).toBe('');
+    removeWorkspace(repo, dir);
+  });
 });
 
 describe('checks', () => {

@@ -354,10 +354,10 @@ export function createApp(deps: AppDeps): SoftscopeApp {
     }
   });
 
-  app.post('/api/change/:id/discard', (c) => {
+  app.post('/api/change/:id/discard', async (c) => {
     if (!session) return c.json({ error: 'No repository is open.' }, 409);
     try {
-      session.changes.discard(c.req.param('id'));
+      await session.changes.discard(c.req.param('id'));
       return c.json(session.changes.status(c.req.param('id')));
     } catch (err) {
       return failed(c, err);
