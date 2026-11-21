@@ -479,9 +479,68 @@ describe('behaviour views (L1)', () => {
       ['connect', 'confirmed'],
       ['close', 'unverified'],
     ]);
-    // Not a sequence: no message numbers in the ids, none on the edges.
-    expect(view.edges.every((e) => !e.id.includes('#') && e.order === undefined)).toBe(true);
+    // Not a sequence: no message numbers on the edges; the ids carry the event instead.
+    expect(view.edges.every((e) => e.order === undefined)).toBe(true);
+    expect(view.edges.map((e) => e.id.slice(e.id.lastIndexOf('#')))).toEqual(['#connect', '#close']);
     expect(issues.map((i) => i.kind)).toEqual(['evidence-missing-file', 'node-dropped', 'edge-dropped', 'edge-unverified']);
+  });
+
+  it('keeps two transitions between the same states on different events apart', () => {
+    const { view, issues } = runL1(
+      l1Graph(
+        'state-machine',
+        [
+          { slug: 'open', kind: 'state', role: 'state', evidence: at(14, 15) },
+          { slug: 'closed', kind: 'state', role: 'final', evidence: at(18, 19) },
+        ],
+        [
+          { from: 'open', to: 'closed', kind: 'transitions-to', label: 'close', evidence: at(15) },
+          { from: 'open', to: 'closed', kind: 'transitions-to', label: 'error', confirmed: false, reason: 'not read', evidence: [] },
+          // The same transition cited twice is still one transition.
+          { from: 'open', to: 'closed', kind: 'transitions-to', label: 'close', evidence: at(14) },
+        ],
+      ),
+    );
+
+    expect(view.edges.map((e) => [e.label, e.status, e.evidence.length])).toEqual([
+      ['close', 'confirmed', 2],
+      ['error', 'unverified', 0],
+    ]);
+    expect(view.edges.map((e) => e.id)).toEqual([
+      `L1:${l1Scope.id}|L1:${l1Scope.id}/open->L1:${l1Scope.id}/closed|transitions-to#close`,
+      `L1:${l1Scope.id}|L1:${l1Scope.id}/open->L1:${l1Scope.id}/closed|transitions-to#error`,
+    ]);
+    expect(issues.map((i) => i.kind)).toEqual(['edge-unverified']);
+
+    // A flow's branches leaving a decision are told apart the same way.
+    const flow = runL1(
+      l1Graph(
+        'flow',
+        [
+          { slug: 'which', role: 'decision', evidence: at(7) },
+          { slug: 'done', role: 'end', evidence: at(21) },
+        ],
+        [
+          { from: 'which', to: 'done', kind: 'next', label: 'closed', evidence: at(19) },
+          { from: 'which', to: 'done', kind: 'next', label: 'already closed', evidence: at(18) },
+        ],
+      ),
+    );
+    expect(flow.view.edges.map((e) => e.label)).toEqual(['closed', 'already closed']);
+    expect(flow.issues).toEqual([]);
+  });
+
+  it('reports an L1 reply that did not pick one of the three kinds but keeps its graph', () => {
+    const { view, issues } = runL1(
+      agentGraph([{ slug: 'a', evidence: at(1) }, { slug: 'b', evidence: at(2) }], [{ from: 'a', to: 'b', evidence: at(3) }], {
+        diagramKind: 'component-graph',
+      }),
+    );
+    expect(view.diagramKind).toBe('component-graph');
+    expect(view.nodes).toHaveLength(2);
+    expect(view.edges).toHaveLength(1);
+    expect(issues.map((i) => i.kind)).toEqual(['behavior-inconsistent']);
+    expect(issues[0]!.message).toContain('"component-graph"');
   });
 
   it('clears a role the diagram kind does not allow, and any role outside a behaviour view', () => {

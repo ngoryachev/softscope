@@ -297,6 +297,15 @@ export function validateView({ repoPath, scope, snapshot, raw, subsystemIds = []
   }
   const roles = allowedRoles(raw.diagramKind);
   const isSequence = raw.diagramKind === 'sequence';
+  const transitionLike = raw.diagramKind === 'state-machine' || raw.diagramKind === 'flow';
+  if (scope.level === 'L1' && !isBehaviorKind(raw.diagramKind)) {
+    issues.push({
+      kind: 'behavior-inconsistent',
+      message:
+        `The agent answered with diagramKind "${raw.diagramKind || '(empty)'}" for a behaviour view instead of one of ` +
+        'state-machine, sequence or flow; it is shown as a plain graph.',
+    });
+  }
 
   // Two different slugs can sanitise to the same id ("HTTP API" and "http-api"), and
   // they are two different nodes: giving them one id would drop the second and silently
@@ -404,9 +413,14 @@ export function validateView({ repoPath, scope, snapshot, raw, subsystemIds = []
   const byId = new Map<string, GraphEdge>();
   survivors.forEach(({ edge, from, to }, index) => {
     const order = orders?.assigned[index];
-    // The same pair can exchange the same kind of message several times in a sequence,
-    // so a message's id carries its position; elsewhere the pair and kind identify it.
-    const id = order === undefined ? edgeId(scope, from, to, edge.kind) : `${edgeId(scope, from, to, edge.kind)}#${order}`;
+    // Outside a behaviour view the pair and the kind identify a relation, and a second
+    // mention is merged into the first. In a behaviour view they do not: the same pair
+    // can exchange the same kind of message several times in a sequence (the id carries
+    // the position), and two transitions or branches between the same states can fire on
+    // different events (the id carries the label), so neither may be merged away.
+    const base = edgeId(scope, from, to, edge.kind);
+    const id =
+      order !== undefined ? `${base}#${order}` : transitionLike && edge.label.trim() ? `${base}#${labelKey(edge.label)}` : base;
     const evidence = checkEvidence(facts, edge.evidence, { edgeId: id }, issues);
     const confirmed = edge.confirmed && evidence.length > 0;
     const why = confirmed
@@ -484,6 +498,16 @@ export function validateView({ repoPath, scope, snapshot, raw, subsystemIds = []
     },
     issues,
   };
+}
+
+/** The part of an edge id that tells two transitions on different events apart. */
+function labelKey(label: string): string {
+  const safe = label
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return (safe || 'label').slice(0, 48);
 }
 
 /**

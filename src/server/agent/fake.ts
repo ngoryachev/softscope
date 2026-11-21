@@ -228,7 +228,7 @@ function behaviorReply(req: GenerateRequest, graph: AgentGraph): AgentGraph {
     });
   const files = index.codeFiles.filter(directlyIn);
   const stateFile = files.find((f) => /connection|state|machine/i.test(baseName(f)));
-  const sequenceFile = files.find((f) => f.includes('server/') || /^(http|cli)/i.test(baseName(f)));
+  const sequenceFile = files.find((f) => f.split('/').includes('server') || /^(http|cli)/i.test(baseName(f)));
 
   const unsupported = (reason: string): AgentGraph => ({
     ...graph,
