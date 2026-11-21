@@ -4,7 +4,7 @@
  * ending in a cached `unsupported`, odd `order` values, and the real-path session.
  */
 import { afterAll, describe, expect, it } from 'vitest';
-import { symlinkSync } from 'node:fs';
+import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
@@ -141,5 +141,83 @@ describe('L1 extra', () => {
     // Spelled through the symlink: `repoPath` is now the real path while `cache.root` is
     // not, so the guard must compare like with like.
     expect(() => new RepoSession(link, { agent: new FakeSchemaAgent(), cache: new FileCache(inside) })).toThrow(/must not live inside/);
+  });
+});
+
+describe('L1 extra: repeat pass over the transition ids and the fake agent path rule', () => {
+  const CONN = 'src/server/connection.ts';
+  const atConn = (startLine: number, endLine = startLine) => [{ file: CONN, startLine, endLine }];
+  const snapshot = { commit: 'c', branch: 'main', dirty: false, stateId: 'c' } as never;
+  const scope: ScopeRef = { level: 'L1', id: 'L2:x/connection', label: 'Connection', paths: [CONN] };
+
+  it('keeps an unlabelled transition apart from a labelled one between the same states, and merges repeated unlabelled ones', () => {
+    const repo = copyFixture();
+    const { view, issues } = validateView({
+      repoPath: repo,
+      scope,
+      snapshot,
+      raw: l1Graph(
+        'state-machine',
+        [
+          { slug: 'open', role: 'state', evidence: atConn(14, 15) },
+          { slug: 'closed', role: 'final', evidence: atConn(18, 19) },
+        ],
+        [
+          { from: 'open', to: 'closed', kind: 'transitions-to', label: 'close', evidence: atConn(15) },
+          { from: 'open', to: 'closed', kind: 'transitions-to', label: '', evidence: atConn(16) },
+          { from: 'open', to: 'closed', kind: 'transitions-to', label: '', evidence: atConn(17) },
+          // Separators of the id grammar in a label never reach the id.
+          { from: 'open', to: 'closed', kind: 'transitions-to', label: 'a|b:c/d', evidence: atConn(20) },
+        ],
+      ),
+    });
+    expect(view.edges.map((e) => [e.id.slice(e.id.lastIndexOf('|')), e.evidence.length])).toEqual([
+      ['|transitions-to#close', 1],
+      ['|transitions-to', 2],
+      ['|transitions-to#a-b-c-d', 1],
+    ]);
+    expect(issues).toEqual([]);
+  });
+
+  it('names an empty diagramKind on L1 as "(empty)" and leaves L2 and unsupported replies alone', () => {
+    const repo = copyFixture();
+    const empty = validateView({ repoPath: repo, scope, snapshot, raw: agentGraph([{ slug: 'a', evidence: atConn(1) }], [], { diagramKind: '' }) });
+    expect(empty.view.diagramKind).toBe('component-graph');
+    expect(empty.issues.map((i) => i.kind)).toEqual(['behavior-inconsistent']);
+    expect(empty.issues[0]!.message).toContain('"(empty)"');
+
+    const unsupported = validateView({ repoPath: repo, scope, snapshot, raw: l1Graph('unsupported', [], [], { supported: false, reason: 'r' }) });
+    expect(unsupported.issues).toEqual([]);
+
+    const l2 = validateView({ repoPath: repo, scope: { ...scope, level: 'L2' }, snapshot, raw: agentGraph([{ slug: 'a', evidence: atConn(1) }]) });
+    expect(l2.issues).toEqual([]);
+  });
+
+  it('fake agent: "server" must be a whole path segment, so webserver/ is unsupported while a root server/ is a sequence', async () => {
+    const repo = copyFixture();
+    const stub = 'export const a = 1;\nexport const b = 2;\nexport const c = 3;\n';
+    for (const dir of ['src/observer', 'src/webserver', 'server']) mkdirSync(join(repo, dir), { recursive: true });
+    writeFileSync(join(repo, 'src/observer/watch.ts'), stub);
+    writeFileSync(join(repo, 'src/webserver/app.ts'), stub);
+    writeFileSync(join(repo, 'server/main.ts'), stub);
+    const agent = new FakeSchemaAgent({
+      fallback: indexDerivedReply,
+      replies: {
+        'L4:root': agentGraph([{ slug: 'app', paths: ['src'], hasDetail: true, evidence: [{ file: 'package.json', startLine: 1, endLine: 1 }] }]),
+        [`L3:${APP_ID}`]: agentGraph([{ slug: 'server', paths: ['src/server'], hasDetail: true, evidence: at(1) }]),
+        [`L2:${SERVER_ID}`]: agentGraph([
+          { slug: 'observer', paths: ['src/observer'], hasDetail: true, evidence: [{ file: 'src/observer/watch.ts', startLine: 1, endLine: 1 }] },
+          { slug: 'webserver', paths: ['src/webserver'], hasDetail: true, evidence: [{ file: 'src/webserver/app.ts', startLine: 1, endLine: 1 }] },
+          { slug: 'rootserver', paths: ['server'], hasDetail: true, evidence: [{ file: 'server/main.ts', startLine: 1, endLine: 1 }] },
+          { slug: 'cli', paths: ['src/cli.ts'], hasDetail: true, evidence: [{ file: 'src/cli.ts', startLine: 1, endLine: 1 }] },
+        ]),
+      },
+    });
+    const session = new RepoSession(repo, { agent, cache: tempCache() });
+    const kinds: Record<string, string> = {};
+    for (const slug of ['observer', 'webserver', 'rootserver', 'cli']) {
+      kinds[slug] = (await session.graph({ level: 'L1', scopeId: `L2:${SERVER_ID}/${slug}` })).view.diagramKind;
+    }
+    expect(kinds).toEqual({ observer: 'unsupported', webserver: 'unsupported', rootserver: 'sequence', cli: 'sequence' });
   });
 });
