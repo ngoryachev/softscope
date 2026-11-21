@@ -617,6 +617,21 @@ describe('behaviour views (L1)', () => {
     expect(issues.filter((i) => i.kind === 'behavior-inconsistent').length).toBeGreaterThanOrEqual(2);
   });
 
+  it('ignores and reports an "unsupported" claim on an L4–L2 reply instead of hiding the graph', () => {
+    const ev = [{ file: 'src/index.ts', startLine: 1, endLine: 1 }];
+    const flagged = run(agentGraph([{ slug: 'app', evidence: ev }], [], { behavior: { supported: false, reason: 'oops' } }), l3Scope);
+    expect(flagged.view.nodes).toHaveLength(1);
+    expect(flagged.view.diagramKind).toBe('component-graph');
+    expect(flagged.view.behavior).toEqual({ supported: true, reason: '' });
+    expect(flagged.issues.map((i) => i.kind)).toEqual(['behavior-inconsistent']);
+    expect(flagged.issues[0]!.message).toContain('L3');
+
+    const kind = run(agentGraph([{ slug: 'app', evidence: ev }], [], { diagramKind: 'unsupported' }));
+    expect(kind.view.nodes).toHaveLength(1);
+    expect(kind.view.diagramKind).toBe('component-graph');
+    expect(kind.issues.map((i) => i.kind)).toEqual(['behavior-inconsistent']);
+  });
+
   it('reports a supported L1 reply that ends up with no element, and not an empty L4 one', () => {
     const l1 = runL1(l1Graph('flow', [{ slug: 'start', role: 'start', evidence: [{ file: 'src/server/nope.ts', startLine: 1, endLine: 1 }] }]));
     expect(l1.view.nodes).toEqual([]);

@@ -240,10 +240,23 @@ function sequenceOrders(edges: ReadonlyArray<AgentGraph['edges'][number]>): { as
  * content: nodes sent along with it are dropped and reported, never drawn. A reply that
  * says `unsupported` as its diagram kind while claiming support is treated as
  * unsupported too — the safe direction, since no diagram is invented either way.
+ *
+ * Only a behaviour view (L1) can be unsupported. An application or a subsystem reply
+ * that says so is an agent mistake: it is reported and the flag ignored, so the user
+ * gets the graph the agent did send rather than a "not available" panel for an area.
  */
-function behaviorOutcome(raw: AgentGraph, issues: ValidationIssue[]): BehaviorInfo {
+function behaviorOutcome(raw: AgentGraph, scope: ScopeRef, issues: ValidationIssue[]): BehaviorInfo {
   const claimsUnsupportedKind = raw.diagramKind === 'unsupported';
   if (raw.behavior.supported && !claimsUnsupportedKind) return { supported: true, reason: '' };
+  if (scope.level !== 'L1') {
+    issues.push({
+      kind: 'behavior-inconsistent',
+      message:
+        `The reply claims no behaviour view is possible (${claimsUnsupportedKind ? 'diagramKind "unsupported"' : 'behavior.supported=false'}), ` +
+        `but only L1 has behaviour views; the claim was ignored for this ${scope.level} view.`,
+    });
+    return { supported: true, reason: '' };
+  }
   if (raw.behavior.supported && claimsUnsupportedKind) {
     issues.push({
       kind: 'behavior-inconsistent',
@@ -275,7 +288,7 @@ export function validateView({ repoPath, scope, snapshot, raw, subsystemIds = []
   const knownSubsystems = new Set(subsystemIds);
   const notes = raw.notes.filter((n) => n.trim().length > 0);
 
-  const behavior = behaviorOutcome(raw, issues);
+  const behavior = behaviorOutcome(raw, scope, issues);
   if (!behavior.supported) {
     return {
       view: { scope, diagramKind: 'unsupported', nodes: [], edges: [], notes, snapshot, behavior },
@@ -461,7 +474,8 @@ export function validateView({ repoPath, scope, snapshot, raw, subsystemIds = []
   return {
     view: {
       scope,
-      diagramKind: raw.diagramKind || 'component-graph',
+      // A non-L1 reply that said "unsupported" was overruled above; it has no kind of its own.
+      diagramKind: raw.diagramKind && raw.diagramKind !== 'unsupported' ? raw.diagramKind : 'component-graph',
       nodes,
       edges,
       notes,
