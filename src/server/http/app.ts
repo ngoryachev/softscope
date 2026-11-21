@@ -179,6 +179,12 @@ export function createApp(deps: AppDeps): SoftscopeApp {
     } catch {
       return c.json({ error: `${path} does not exist.` }, 400);
     }
+    // The same repository again (a second browser tab, a reload that re-posts the path):
+    // the session stays, and with it the open change.
+    if (session && session.repoPath === path) return c.json(session.state());
+    // Another repository: the old session's open change would be unreachable from now
+    // on, so it is cancelled and its worktree removed before the switch.
+    if (session) await session.close();
     try {
       session = new RepoSession(path, sessionDeps());
     } catch (err) {

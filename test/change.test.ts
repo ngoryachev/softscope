@@ -12,6 +12,14 @@ import { FakeChangeAgent, type FakeChangeAgentOptions } from '../src/server/agen
 import { RepoSession } from '../src/server/session';
 import type { ApiError, ApplyResponse, ChangeStatus, RepoState } from '../src/shared/api';
 import type { SelectionContext, Snapshot } from '../src/shared/graph';
+import { ownerFile, workspaceOwner } from '../src/server/change/workspace';
+import { spawnSync } from 'node:child_process';
+
+/** The pid of a process that has already exited: an owner that is gone. */
+function deadPid(): number {
+  const r = spawnSync(process.execPath, ['-e', '']);
+  return r.pid!;
+}
 import {
   agentGraph,
   cleanupTemps,
@@ -487,15 +495,18 @@ describe('the open change across reloads and restarts', () => {
     expect(((await (await app.request('/api/state')).json()) as RepoState).activeChangeId).toBeNull();
   });
 
-  it('a new session removes the worktrees a previous run left behind and starts clean', async () => {
+  it('a new session removes the worktrees a dead server run left behind and starts clean', async () => {
     const first = build();
     await loadViews(first);
     const id = await startChange(first);
     const done = await settled(first, id);
     expect(existsSync(done.workspaceDir)).toBe(true);
     expect(worktrees(repo)).toHaveLength(2);
+    expect(workspaceOwner(done.workspaceDir)).toBe(process.pid);
 
-    // "Server restart": a fresh session over the same repository and work directory.
+    // "Server restart": the owning process is gone, and a fresh session opens the same
+    // repository over the same work directory.
+    writeFileSync(ownerFile(done.workspaceDir), `${deadPid()}\n`);
     const second = build();
     expect(existsSync(done.workspaceDir)).toBe(false);
     expect(worktrees(repo)).toHaveLength(1);
@@ -505,6 +516,71 @@ describe('the open change across reloads and restarts', () => {
     expect(gitOut(repo, ['status', '--porcelain']).trim()).toBe('');
     await loadViews(second);
     expect((await settled(second, await startChange(second))).status).toBe('done');
+  });
+
+  it('leaves the worktree of a change another live server instance owns alone', async () => {
+    const first = build();
+    await loadViews(first);
+    const id = await startChange(first);
+    const done = await settled(first, id);
+    const firstAgent = changeAgent;
+
+    // A second instance on the same repository (this process stands in for it: the owner pid is alive).
+    const second = build();
+    expect(existsSync(done.workspaceDir)).toBe(true);
+    expect(worktrees(repo)).toHaveLength(2);
+    expect(((await (await second.request('/api/state')).json()) as RepoState).activeChangeId).toBeNull();
+
+    // The first instance still owns its change and can land it.
+    expect((await post(first, `/api/change/${id}/apply`, {})).status).toBe(200);
+    expect(readFileSync(join(repo, LOG_FILE), 'utf8')).toContain('softscope:');
+    expect(existsSync(done.workspaceDir)).toBe(false);
+    expect(existsSync(ownerFile(done.workspaceDir))).toBe(false);
+    expect(worktrees(repo)).toHaveLength(1);
+    expect(firstAgent.calls).toHaveLength(1);
+  });
+
+  it('re-opening the same repository keeps the session and its open change; another repository closes it first', async () => {
+    const app = build({ delayMs: 400 });
+    await loadViews(app);
+    const id = await startChange(app);
+    const openRepo = (path: string) => post(app, '/api/repo', { path });
+
+    // The same path again while the agent is still running: nothing is lost.
+    const same = await openRepo(repo);
+    expect(same.status).toBe(200);
+    expect(((await same.json()) as RepoState).activeChangeId).toBe(id);
+    expect((await app.request(`/api/change/${id}`)).status).toBe(200);
+    const done = await settled(app, id);
+    expect(done.status).toBe('done');
+    expect(worktrees(repo)).toHaveLength(2);
+
+    // Another repository: the open change is discarded on the way out, no worktree remains.
+    const other = copyFixtureAsGitRepo();
+    const switched = await openRepo(other);
+    expect(switched.status).toBe(200);
+    expect(((await switched.json()) as RepoState).repoPath).toBe(other);
+    expect(((await switched.json().catch(() => ({}))) as RepoState).activeChangeId ?? null).toBeNull();
+    expect(existsSync(done.workspaceDir)).toBe(false);
+    expect(worktrees(repo)).toHaveLength(1);
+    expect(gitOut(repo, ['status', '--porcelain']).trim()).toBe('');
+    expect((await app.request(`/api/change/${id}`)).status).toBe(404);
+  });
+
+  it('discards a change that is still running when the session switches repositories', async () => {
+    const app = build({ delayMs: 5000 });
+    await loadViews(app);
+    const id = await startChange(app);
+    await waitFor(() => changeAgent.calls.length === 1);
+    const running = await status(app, id);
+    expect(running.status).toBe('running');
+
+    const other = copyFixtureAsGitRepo();
+    const started = Date.now();
+    expect((await post(app, '/api/repo', { path: other })).status).toBe(200);
+    expect(Date.now() - started).toBeLessThan(4000); // the abort is honoured, not waited out
+    expect(existsSync(running.workspaceDir)).toBe(false);
+    expect(worktrees(repo)).toHaveLength(1);
   });
 });
 

@@ -120,6 +120,11 @@ export class RepoSession {
     return isGitRepoAt(this.repoPath);
   }
 
+  /** Releases what another session could not take over: the open change and its worktree. */
+  async close(): Promise<void> {
+    await this.changes.close();
+  }
+
   /** Repository-relative directories of the packages the index knows, the root included. */
   packageDirs(): string[] {
     return this.index().packages.packages.map((p) => p.dir);

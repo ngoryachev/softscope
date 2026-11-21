@@ -209,7 +209,9 @@ produced with explicit `a/` `b/` prefixes whatever your `diff.*` settings say. A
 changes live in memory: a page reload picks the open change up again (`GET /api/state`
 reports `activeChangeId`), but restarting the server forgets it — the next time the
 repository is opened, the worktrees a previous run left under the work directory are
-removed, so an unreviewed draft does not survive a restart. With `SOFTSCOPE_FAKE_AGENT=1` the change agent is
+removed (each worktree records the pid of the server that owns it in `<id>.owner`, so a
+second running instance leaves another's drafts alone), and switching the session to
+another repository discards the open change first. With `SOFTSCOPE_FAKE_AGENT=1` the change agent is
 faked too: it appends a comment carrying your instruction to the first selected file that
 can take one (a `package.json` is left alone), so the whole flow can be clicked through
 without tokens. Ctrl+C on the server cancels an open change, which stops its running

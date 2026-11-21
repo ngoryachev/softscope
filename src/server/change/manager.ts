@@ -288,6 +288,15 @@ export class ChangeManager {
   }
 
   /**
+   * The session is being replaced: the open change, if any, is cancelled and its worktree
+   * removed, since nothing will be able to reach it afterwards.
+   */
+  async close(): Promise<void> {
+    const open = this.active();
+    if (open) await this.discard(open.id);
+  }
+
+  /**
    * Removes the worktrees a previous server run left under the work directory for this
    * repository: nothing in memory knows them, so nobody could apply or discard them.
    */

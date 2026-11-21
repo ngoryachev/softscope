@@ -10,7 +10,7 @@
  * modifications alike and forgets a file the agent created and later removed again.
  */
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, lstatSync, mkdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import type { Snapshot } from '../../shared/graph';
@@ -184,6 +184,9 @@ export function createWorkspace(opts: CreateWorkspaceOptions): Workspace {
     if (!committed.ok) throw new WorkspaceRefusedError(`Could not record the base state: ${committed.stderr.trim()}`);
 
     linkNodeModules(repoPath, dir, ['.', ...(opts.packageDirs ?? [])]);
+    // Next to the worktree, not inside it (it would show up in the diff): which server
+    // process owns this draft, so another instance's startup cleanup leaves it alone.
+    writeFileSync(ownerFile(dir), `${process.pid}\n`, 'utf8');
   } catch (err) {
     removeWorkspace(repoPath, dir);
     throw err;
@@ -232,7 +235,33 @@ export function workspaceDiff(dir: string): string {
 export function removeWorkspace(repoPath: string, dir: string): void {
   git(repoPath, ['worktree', 'remove', '--force', dir]);
   rmSync(dir, { recursive: true, force: true });
+  rmSync(ownerFile(dir), { force: true });
   git(repoPath, ['worktree', 'prune']);
+}
+
+/** `<workDir>/<id>.owner`: the pid of the server process that created the worktree `<workDir>/<id>`. */
+export function ownerFile(dir: string): string {
+  return `${dir.replace(/\/+$/, '')}.owner`;
+}
+
+/** The pid recorded for a worktree, or null when there is none. */
+export function workspaceOwner(dir: string): number | null {
+  try {
+    const pid = Number(readFileSync(ownerFile(dir), 'utf8').trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+/** True when a process with this pid exists (EPERM means it does, just not ours to signal). */
+export function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
 }
 
 export interface PatchConflict {
@@ -265,8 +294,10 @@ export function checkPatch(repoPath: string, patch: string): PatchConflict | nul
 }
 
 /**
- * Removes the worktrees of `repoPath` that live under `workDir` and are not in `keep`:
- * drafts a previous server run left behind. Returns the directories removed.
+ * Removes the worktrees of `repoPath` that live under `workDir`, are not in `keep`, and
+ * whose owning server process is gone: drafts a previous run left behind. A worktree
+ * whose owner is still alive belongs to another running instance and is left alone.
+ * Returns the directories removed.
  */
 export function pruneLeftoverWorkspaces(repoPath: string, workDir: string, keep: Iterable<string> = []): string[] {
   const list = git(repoPath, ['worktree', 'list', '--porcelain']);
@@ -279,6 +310,8 @@ export function pruneLeftoverWorkspaces(repoPath: string, workDir: string, keep:
     const dir = line.slice('worktree '.length);
     const real = realOrSelf(dir);
     if (!real.startsWith(root) || kept.has(real)) continue;
+    const owner = workspaceOwner(dir);
+    if (owner !== null && isProcessAlive(owner)) continue;
     removeWorkspace(repoPath, dir);
     removed.push(dir);
   }
