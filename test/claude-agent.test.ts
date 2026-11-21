@@ -4,7 +4,8 @@
  * signal is already aborted before the call) and tool calls are reported as progress.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ClaudeSchemaAgent } from '../src/server/agent/claude';
+import { join } from 'node:path';
+import { ClaudeSchemaAgent, describeToolInput } from '../src/server/agent/claude';
 import { AgentError, type AgentActivity, type GenerateRequest } from '../src/server/agent/types';
 import { buildIndex } from '../src/server/indexer/index';
 import { rootScope } from '../src/shared/graph';
@@ -74,6 +75,42 @@ describe('ClaudeSchemaAgent', () => {
     expect(global).toEqual(expected);
     expect(perRequest).toEqual(expected);
     expect(calls).toHaveLength(1);
+  });
+
+  it('reports the paths the agent touches relative to the analyzed repository', async () => {
+    script = async function* () {
+      yield {
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', name: 'Read', input: { file_path: join(repo, 'src/core/math.ts') } },
+            { type: 'tool_use', name: 'Grep', input: { pattern: 'add', path: join(repo, 'src') } },
+            { type: 'tool_use', name: 'Read', input: { file_path: '/etc/hosts' } },
+            { type: 'tool_use', name: 'Glob', input: { pattern: '**/*.ts' } },
+          ],
+        },
+      };
+      yield { type: 'result', subtype: 'success', structured_output: reply, result: '' };
+    };
+    const seen: AgentActivity[] = [];
+    const agent = new ClaudeSchemaAgent();
+
+    await agent.generate({ ...request(), onProgress: (e) => seen.push(e) });
+
+    expect(seen).toEqual([
+      { tool: 'Read', detail: 'src/core/math.ts' },
+      { tool: 'Grep', detail: 'add in src' },
+      { tool: 'Read', detail: '/etc/hosts' },
+      { tool: 'Glob', detail: '**/*.ts' },
+    ]);
+  });
+
+  it('leaves a relative or foreign path and the fallback detail untouched', () => {
+    expect(describeToolInput('Read', { file_path: 'src/a.ts' }, '/repo')).toBe('src/a.ts');
+    expect(describeToolInput('Read', { file_path: '/repo/src/a.ts' }, '/repo')).toBe('src/a.ts');
+    expect(describeToolInput('Read', { file_path: '/repository/src/a.ts' }, '/repo')).toBe('/repository/src/a.ts');
+    expect(describeToolInput('Grep', { pattern: 'x' }, '/repo')).toBe('x');
+    expect(describeToolInput('Bash', { command: 'ls' }, '/repo')).toBe('ls');
   });
 
   it('aborts the SDK call when the request signal is aborted during the run', async () => {

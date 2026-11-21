@@ -5,17 +5,34 @@
  *  - a boundary node is dashed, because it is not code of this repository (SPEC §4.4);
  *  - an `unverified` edge is dashed, muted and labelled, because the relation is not
  *    backed by evidence and must not read as a fact (SPEC §5.4).
+ *
+ * Selection (SPEC §6.3, FR-07): a plain click replaces this level's selection and
+ * focuses the item, Shift/Ctrl/Cmd+click toggles it, a left-drag on the pane draws a
+ * marquee that adds the covered nodes. Items in the basket are tinted
+ * (`sz-node-selected` / `sz-edge-selected`); the focused item — the one the inspector
+ * shows — has the stronger outline (`sz-node-focused` / `sz-edge-focused`).
+ *
+ * React Flow only applies a marquee to nodes it owns, so the canvas keeps the laid-out
+ * nodes and edges in local state, re-seeded when the view changes, and mirrors the
+ * basket into their `selected` flags one way. The marquee reports through
+ * `onSelectionChange`; it only ever adds, so React Flow's own deselects (a pane click,
+ * the start of a new rectangle) do not empty the basket behind the user's back.
  */
-import { useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import dagre from '@dagrejs/dagre';
 import {
   Background,
   Controls,
   MarkerType,
   ReactFlow,
+  SelectionMode,
+  useEdgesState,
+  useNodesState,
   type Edge,
+  type EdgeMouseHandler,
   type Node,
   type NodeMouseHandler,
+  type OnSelectionChangeFunc,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import type { GraphView } from '../../shared/graph';
@@ -23,14 +40,44 @@ import type { GraphView } from '../../shared/graph';
 const NODE_WIDTH = 190;
 const NODE_HEIGHT = 64;
 
+export type SelectableKind = 'node' | 'edge';
+
+export interface SelectableRef {
+  kind: SelectableKind;
+  id: string;
+}
+
+/** The context basket: ids of every selected node and relation, across levels. */
+export interface Basket {
+  nodeIds: ReadonlySet<string>;
+  edgeIds: ReadonlySet<string>;
+}
+
 export interface GraphCanvasProps {
   view: GraphView;
-  selectedNodeId: string | null;
-  selectedEdgeId: string | null;
-  onSelectNode: (id: string | null) => void;
-  onSelectEdge: (id: string | null) => void;
+  basket: Basket;
+  focused: SelectableRef | null;
+  /** A click on a node or relation; `toggle` when Shift, Ctrl or Cmd was held. */
+  onSelect: (item: SelectableRef, options: { toggle: boolean }) => void;
+  /** The nodes a marquee covers; they are added to the basket. */
+  onMarquee: (nodeIds: string[]) => void;
+  /** A click on the empty pane. */
+  onClearFocus: () => void;
   onOpenNode: (id: string) => void;
 }
+
+const nodeClass = (view: GraphView, id: string): string => {
+  const node = view.nodes.find((n) => n.id === id);
+  if (!node) return 'sz-node';
+  return [
+    'sz-node',
+    node.boundary ? 'sz-node-boundary' : '',
+    node.childScope ? 'sz-node-openable' : '',
+    node.memberOf.length > 1 ? 'sz-node-shared' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+};
 
 function layout(view: GraphView): { nodes: Node[]; edges: Edge[] } {
   const g = new dagre.graphlib.Graph();
@@ -59,14 +106,7 @@ function layout(view: GraphView): { nodes: Node[]; edges: Edge[] } {
       },
       data: { label: node.title },
       type: 'default',
-      className: [
-        'sz-node',
-        node.boundary ? 'sz-node-boundary' : '',
-        node.childScope ? 'sz-node-openable' : '',
-        node.memberOf.length > 1 ? 'sz-node-shared' : '',
-      ]
-        .filter(Boolean)
-        .join(' '),
+      className: nodeClass(view, node.id),
       style: { width: NODE_WIDTH, height: NODE_HEIGHT },
     };
   });
@@ -123,33 +163,87 @@ function Legend({ view }: { view: GraphView }) {
       <span>
         <i className="sz-swatch sz-swatch-unverified" /> {dataFlow ? 'unverified data flow' : 'unverified relation'}
       </span>
+      <span className="sz-legend-hint">click: select · Shift/Ctrl+click: add · drag: marquee · double-click: open</span>
     </div>
   );
 }
 
-export function GraphCanvas({
-  view,
-  selectedNodeId,
-  selectedEdgeId,
-  onSelectNode,
-  onSelectEdge,
-  onOpenNode,
-}: GraphCanvasProps) {
-  const { nodes, edges } = useMemo(() => layout(view), [view]);
+const isToggle = (event: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }) =>
+  event.shiftKey || event.ctrlKey || event.metaKey;
 
-  const decorated = nodes.map((n) => ({
-    ...n,
-    className: `${n.className ?? ''}${n.id === selectedNodeId ? ' sz-node-selected' : ''}`,
-  }));
-  const decoratedEdges = edges.map((e) => ({
-    ...e,
-    className: `${e.className ?? ''}${e.id === selectedEdgeId ? ' sz-edge-selected' : ''}`,
-    style: e.id === selectedEdgeId ? { ...e.style, strokeWidth: 3 } : e.style,
-  }));
+/** The multi-selection keys React Flow honours, matching the toggle modifiers above. */
+const MULTI_SELECT_KEYS = ['Shift', 'Control', 'Meta'];
 
-  const handleNodeClick: NodeMouseHandler = (_event, node) => {
-    onSelectEdge(null);
-    onSelectNode(node.id);
+export function GraphCanvas({ view, basket, focused, onSelect, onMarquee, onClearFocus, onOpenNode }: GraphCanvasProps) {
+  const layouted = useMemo(() => layout(view), [view]);
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node>(layouted.nodes);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>(layouted.edges);
+  // The latest basket, for the re-seed: it must not re-run on every basket change, or a
+  // node the user dragged would jump back to its laid-out position.
+  const basketRef = useRef(basket);
+  basketRef.current = basket;
+
+  useEffect(() => {
+    const b = basketRef.current;
+    setNodes(layouted.nodes.map((n) => ({ ...n, selected: b.nodeIds.has(n.id) })));
+    setEdges(layouted.edges.map((e) => ({ ...e, selected: b.edgeIds.has(e.id) })));
+  }, [layouted, setNodes, setEdges]);
+
+  // One-way mirror of the basket into React Flow's own selection flags, so that a
+  // Shift+click on a basket node reads as a deselect there too.
+  useEffect(() => {
+    setNodes((prev) => {
+      let changed = false;
+      const next = prev.map((n) => {
+        const selected = basket.nodeIds.has(n.id);
+        if ((n.selected ?? false) === selected) return n;
+        changed = true;
+        return { ...n, selected };
+      });
+      return changed ? next : prev;
+    });
+    setEdges((prev) => {
+      let changed = false;
+      const next = prev.map((e) => {
+        const selected = basket.edgeIds.has(e.id);
+        if ((e.selected ?? false) === selected) return e;
+        changed = true;
+        return { ...e, selected };
+      });
+      return changed ? next : prev;
+    });
+  }, [basket, setNodes, setEdges]);
+
+  const decorated = nodes.map((n) => {
+    const inBasket = basket.nodeIds.has(n.id);
+    const isFocused = focused?.kind === 'node' && focused.id === n.id;
+    return {
+      ...n,
+      className: `${nodeClass(view, n.id)}${inBasket ? ' sz-node-selected' : ''}${isFocused ? ' sz-node-focused' : ''}`,
+    };
+  });
+  const decoratedEdges = edges.map((e) => {
+    const inBasket = basket.edgeIds.has(e.id);
+    const isFocused = focused?.kind === 'edge' && focused.id === e.id;
+    const base = e.className?.replace(/ sz-edge-(selected|focused)/g, '') ?? 'sz-edge';
+    return {
+      ...e,
+      className: `${base}${inBasket ? ' sz-edge-selected' : ''}${isFocused ? ' sz-edge-focused' : ''}`,
+      style: isFocused ? { ...e.style, strokeWidth: 3 } : inBasket ? { ...e.style, strokeWidth: 2.5 } : e.style,
+    };
+  });
+
+  const handleNodeClick: NodeMouseHandler = (event, node) => {
+    onSelect({ kind: 'node', id: node.id }, { toggle: isToggle(event) });
+  };
+  const handleEdgeClick: EdgeMouseHandler = (event, edge) => {
+    onSelect({ kind: 'edge', id: edge.id }, { toggle: isToggle(event) });
+  };
+  // Nodes only: the rectangle also selects the edges between covered nodes, which is not
+  // what the user drew. Relations enter the basket by click.
+  const handleSelectionChange: OnSelectionChangeFunc = ({ nodes: selectedNodes }) => {
+    const ids = selectedNodes.map((n) => n.id).filter((id) => !basket.nodeIds.has(id));
+    if (ids.length > 0) onMarquee(ids);
   };
 
   return (
@@ -157,16 +251,18 @@ export function GraphCanvas({
       <ReactFlow
         nodes={decorated}
         edges={decoratedEdges}
+        onNodesChange={onNodesChange}
+        onEdgesChange={onEdgesChange}
         onNodeClick={handleNodeClick}
         onNodeDoubleClick={(_event, node) => onOpenNode(node.id)}
-        onEdgeClick={(_event, edge) => {
-          onSelectNode(null);
-          onSelectEdge(edge.id);
-        }}
-        onPaneClick={() => {
-          onSelectNode(null);
-          onSelectEdge(null);
-        }}
+        onEdgeClick={handleEdgeClick}
+        onPaneClick={onClearFocus}
+        onSelectionChange={handleSelectionChange}
+        selectionOnDrag
+        selectionMode={SelectionMode.Partial}
+        selectNodesOnDrag={false}
+        panOnDrag={[1, 2]}
+        multiSelectionKeyCode={MULTI_SELECT_KEYS}
         fitView
         proOptions={{ hideAttribution: true }}
         nodesConnectable={false}

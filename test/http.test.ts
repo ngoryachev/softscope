@@ -2,9 +2,10 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { appendFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createApp } from '../src/server/http/app';
+import { describeToolInput } from '../src/server/agent/claude';
 import { FakeSchemaAgent } from '../src/server/agent/fake';
 import { RepoSession } from '../src/server/session';
-import type { FileResponse, GraphResponse, RepoState } from '../src/shared/api';
+import type { ContextResponse, FileResponse, GraphResponse, RepoState } from '../src/shared/api';
 import type { Snapshot } from '../src/shared/graph';
 import { agentGraph, cleanupTemps, commitAll, copyFixtureAsGitRepo, tempCache } from './helpers';
 
@@ -404,5 +405,119 @@ describe('/api/file', () => {
     const app = build();
     expect((await app.request('/api/file?path=src/nope.ts')).status).toBe(404);
     expect((await app.request('/api/file?path=src')).status).toBe(404);
+  });
+});
+
+describe('/api/context', () => {
+  const FS_ID = 'L4:root/fs';
+  const postContext = (app: ReturnType<typeof build>, body: unknown, extra = '') =>
+    app.request(`/api/context${extra}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: typeof body === 'string' ? body : JSON.stringify(body),
+    });
+
+  it('builds the context of a selection across the loaded L4 and L3 views', async () => {
+    const app = build();
+    await app.request('/api/graph?level=L4&scope=root');
+    await app.request(`/api/graph?level=L3&scope=${encodeURIComponent(APP_ID)}`);
+
+    const res = await postContext(app, { nodeIds: [APP_ID, LOGGING_ID], edgeIds: [], task: 'add a request id' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ContextResponse;
+
+    expect(body.task).toBe('add a request id');
+    expect(body.nodes.map((n) => [n.id, n.level, n.title])).toEqual([
+      [APP_ID, 'L4', 'sample-app'],
+      [LOGGING_ID, 'L3', 'logging'],
+    ]);
+    // The node's 1-5 and the external relation's evidence (none) → one range per file.
+    expect(body.files).toEqual([
+      { file: 'src/index.ts', ranges: [{ startLine: 1, endLine: 5 }] },
+      { file: 'src/util/log.ts', ranges: [{ startLine: 1, endLine: 3 }] },
+    ]);
+    expect(body.size).toEqual({ files: 2, lines: 8 });
+    expect(body.relations.internal).toEqual([]);
+    expect(body.relations.external).toEqual([
+      expect.objectContaining({
+        from: { id: APP_ID, title: 'sample-app' },
+        to: { id: FS_ID, title: 'filesystem' },
+        kind: 'reads',
+        status: 'unverified',
+        reason: 'path comes from a variable',
+      }),
+    ]);
+    expect(body.stale).toBe(false);
+    expect(body.warnings).toEqual([]);
+    expect(body.snapshots).toHaveLength(1);
+    expect(body.snapshots[0]!.scopes.map((s) => `${s.level}:${s.id}`)).toEqual(['L4:root', `L3:${APP_ID}`]);
+    expect(body.limits.paths).toEqual(['src', 'src/util']);
+    expect(agent.calls).toHaveLength(2);
+  });
+
+  it('renders the same context as Markdown on request', async () => {
+    const app = build();
+    await app.request('/api/graph?level=L4&scope=root');
+
+    const res = await postContext(app, { nodeIds: [APP_ID], edgeIds: [], task: 'rename it' }, '?format=markdown');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/markdown');
+    const text = await res.text();
+    expect(text).toContain('## Task');
+    expect(text).toContain('rename it');
+    expect(text).toContain('## Selected entities');
+    expect(text).toContain('**sample-app**');
+    expect(text).toContain('- src/index.ts:1-5');
+    expect(text).toContain('### External');
+    expect(text).toContain('sample-app → filesystem (reads) — unverified: path comes from a variable');
+    expect(text).toContain('## Size');
+  });
+
+  it('never generates: an id of a view that is not loaded becomes a warning', async () => {
+    const app = build();
+    await app.request('/api/graph?level=L4&scope=root');
+    await app.request(`/api/graph?level=L3&scope=${encodeURIComponent(APP_ID)}`);
+
+    const logId = `L2:${LOGGING_ID}/log`;
+    const body = (await (await postContext(app, { nodeIds: [APP_ID, logId], edgeIds: [] })).json()) as ContextResponse;
+
+    expect(body.nodes.map((n) => n.id)).toEqual([APP_ID]);
+    expect(body.warnings).toEqual([expect.stringContaining(`view L2:${LOGGING_ID}, which is not loaded`)]);
+    expect(agent.callsFor('L2', LOGGING_ID)).toBe(0);
+    expect(agent.calls).toHaveLength(2);
+  });
+
+  it('marks the context stale once the repository moves', async () => {
+    const app = build();
+    await app.request('/api/graph?level=L4&scope=root');
+    appendFileSync(join(repo, 'src/util/log.ts'), '\nexport const extra = 3;\n');
+
+    const body = (await (await postContext(app, { nodeIds: [APP_ID], edgeIds: [] })).json()) as ContextResponse;
+    expect(body.stale).toBe(true);
+    expect(body.warnings).toEqual([expect.stringContaining('the repository is now at')]);
+  });
+
+  it('answers 400 for a malformed body and 409 without a repository', async () => {
+    const app = build();
+    expect((await postContext(app, 'not json')).status).toBe(400);
+    expect((await postContext(app, { nodeIds: 'L4:root/app', edgeIds: [] })).status).toBe(400);
+    expect((await postContext(app, { nodeIds: [1], edgeIds: [] })).status).toBe(400);
+    expect((await postContext(app, { nodeIds: [] })).status).toBe(400);
+    expect((await postContext(app, { nodeIds: [], edgeIds: [], task: 7 })).status).toBe(400);
+    expect((await postContext(app, { nodeIds: [], edgeIds: [] })).status).toBe(200);
+
+    expect((await postContext(build(false), { nodeIds: [], edgeIds: [] })).status).toBe(409);
+  });
+});
+
+describe('progress activity paths', () => {
+  it('shows the files the agent reads relative to the analyzed repository', () => {
+    expect(describeToolInput('Read', { file_path: join(repo, 'src/util/log.ts') }, repo)).toBe('src/util/log.ts');
+    expect(describeToolInput('Grep', { pattern: 'log', path: join(repo, 'src') }, repo)).toBe('log in src');
+    expect(describeToolInput('Grep', { pattern: 'log', path: repo }, repo)).toBe('log in .');
+    // Outside the repository, and without a repository, the path is left as it came.
+    expect(describeToolInput('Read', { file_path: '/etc/hosts' }, repo)).toBe('/etc/hosts');
+    expect(describeToolInput('Read', { file_path: join(repo, 'src/util/log.ts') })).toBe(join(repo, 'src/util/log.ts'));
+    expect(describeToolInput('Glob', { pattern: `${repo}/**/*.ts` }, repo)).toBe(`${repo}/**/*.ts`);
   });
 });

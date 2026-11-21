@@ -10,6 +10,7 @@ import { statSync } from 'node:fs';
 import type { AgentGraph } from '../shared/agent-schema';
 import type { GraphResponse, ProgressEvent, RepoState } from '../shared/api';
 import {
+  buildSelectionContext,
   nextLevel,
   rootScope,
   ROOT_SCOPE_ID,
@@ -18,6 +19,8 @@ import {
   type GraphView,
   type Level,
   type ScopeRef,
+  type SelectionContext,
+  type SelectionInput,
   type Snapshot,
 } from '../shared/graph';
 import { generatableLevels, supportsLevel } from './agent/prompts';
@@ -248,6 +251,23 @@ export class RepoSession {
     } finally {
       requestSignal?.removeEventListener('abort', onRequestAbort);
     }
+  }
+
+  /**
+   * Every view produced so far in this session, cached or generated, in the order they
+   * were produced. The selection context is built from these and nothing else.
+   */
+  loadedViews(): GraphView[] {
+    return [...this.views.values()];
+  }
+
+  /**
+   * The structured context of a selection (SPEC §8.4) over the views already loaded,
+   * compared with the live repository state. Never calls the agent: an id of a view that
+   * was not produced yet is reported as a warning, not generated.
+   */
+  selectionContext(input: SelectionInput): SelectionContext {
+    return buildSelectionContext(this.loadedViews(), input, { live: this.liveSnapshot() });
   }
 
   /** Aborts the running generation of a scope. False when nothing is running for it. */

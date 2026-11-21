@@ -10,6 +10,7 @@
  *  - the reply must match our JSON Schema, which the server then validates against the
  *    real files anyway.
  */
+import { isAbsolute, relative, sep } from 'node:path';
 import { query, type Options, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { agentGraphJsonSchema, parseAgentGraph, type AgentGraph } from '../../shared/agent-schema';
 import { buildPrompt } from './prompts';
@@ -32,17 +33,34 @@ export interface ClaudeSchemaAgentOptions {
   onProgress?: (event: AgentActivity) => void;
 }
 
-/** The target of a tool call in the words a user understands: a path, a pattern. */
-export function describeToolInput(tool: string, input: unknown): string {
+/**
+ * A path as the user knows it: relative to the analyzed repository, POSIX-separated,
+ * when it is an absolute path inside that repository; unchanged otherwise.
+ */
+export function repoRelative(path: string, repoPath?: string): string {
+  if (!repoPath || !isAbsolute(path)) return path;
+  const rel = relative(repoPath, path);
+  if (rel === '') return '.';
+  if (rel.startsWith('..') || isAbsolute(rel)) return path;
+  return sep === '/' ? rel : rel.split(sep).join('/');
+}
+
+/**
+ * The target of a tool call in the words a user understands: a path, a pattern. The SDK
+ * reports absolute paths; with `repoPath` the file paths of Read and Grep are shown
+ * relative to the analyzed repository. Patterns and other details are left alone.
+ */
+export function describeToolInput(tool: string, input: unknown, repoPath?: string): string {
   const record = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
   const str = (key: string) => (typeof record[key] === 'string' ? (record[key] as string) : '');
+  const rel = (p: string) => (p ? repoRelative(p, repoPath) : p);
   const known = (() => {
     switch (tool) {
       case 'Read':
-        return str('file_path') || str('path');
+        return rel(str('file_path') || str('path'));
       case 'Grep': {
         const pattern = str('pattern');
-        const where = str('path');
+        const where = rel(str('path'));
         return pattern && where ? `${pattern} in ${where}` : pattern;
       }
       case 'Glob':
@@ -97,7 +115,10 @@ export class ClaudeSchemaAgent implements SchemaAgent {
         if (message.type === 'assistant') {
           for (const block of message.message.content) {
             if (block.type === 'tool_use') {
-              const event: AgentActivity = { tool: block.name, detail: describeToolInput(block.name, block.input) };
+              const event: AgentActivity = {
+                tool: block.name,
+                detail: describeToolInput(block.name, block.input, req.repoPath),
+              };
               this.opts.onProgress?.(event);
               req.onProgress?.(event);
             }

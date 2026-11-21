@@ -10,7 +10,16 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import type { UnofficialStatusCode } from 'hono/utils/http-status';
-import type { ApiError, CancelRequest, FileResponse, OpenRepoRequest, ProgressEvent, RepoState } from '../../shared/api';
+import type {
+  ApiError,
+  CancelRequest,
+  ContextRequest,
+  FileResponse,
+  OpenRepoRequest,
+  ProgressEvent,
+  RepoState,
+} from '../../shared/api';
+import { renderContextMarkdown } from '../../shared/context-markdown';
 import { LEVELS, type Level } from '../../shared/graph';
 import { AgentError, type SchemaAgent } from '../agent/types';
 import { generatableLevels } from '../agent/prompts';
@@ -52,6 +61,22 @@ function safeResolve(repoPath: string, candidate: string): string | null {
   if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return null;
   if (!staysInsideRepo(repoPath, abs)) return null;
   return abs;
+}
+
+const isStringArray = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((v) => typeof v === 'string');
+
+/** The body of `POST /api/context`, or null when it is not one. */
+function parseContextRequest(body: unknown): ContextRequest | null {
+  if (!body || typeof body !== 'object') return null;
+  const record = body as Record<string, unknown>;
+  if (!isStringArray(record.nodeIds) || !isStringArray(record.edgeIds)) return null;
+  if (record.task !== undefined && typeof record.task !== 'string') return null;
+  return {
+    nodeIds: record.nodeIds,
+    edgeIds: record.edgeIds,
+    ...(typeof record.task === 'string' ? { task: record.task } : {}),
+  };
 }
 
 export function createApp(deps: AppDeps): SoftscopeApp {
@@ -163,6 +188,25 @@ export function createApp(deps: AppDeps): SoftscopeApp {
     }
     const cancelled = session.cancel(body.level, body.scopeId);
     return c.json({ cancelled });
+  });
+
+  /**
+   * The structured context of a selection (SPEC §8.4), from the views this session has
+   * already produced. Never generates: an id of a view not loaded yet becomes a warning.
+   * `?format=markdown` renders the same context as text.
+   */
+  app.post('/api/context', async (c) => {
+    if (!session) return c.json({ error: 'No repository is open.' }, 409);
+    const body = await c.req.json().catch(() => null);
+    const input = parseContextRequest(body);
+    if (!input) {
+      return c.json({ error: 'A JSON body with nodeIds and edgeIds (string arrays) and an optional task is required.' }, 400);
+    }
+    const context = session.selectionContext(input);
+    if (c.req.query('format') === 'markdown') {
+      return c.text(renderContextMarkdown(context), 200, { 'content-type': 'text/markdown; charset=utf-8' });
+    }
+    return c.json(context);
   });
 
   app.get('/api/file', (c) => {

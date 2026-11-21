@@ -1,5 +1,5 @@
 /** Request and response shapes of the local HTTP API, shared by server and UI. */
-import type { GraphView, Level, ScopeRef, Snapshot } from './graph';
+import type { GraphView, Level, ScopeRef, SelectionContext, Snapshot } from './graph';
 
 export interface RepoState {
   repoPath: string | null;
@@ -61,6 +61,18 @@ export interface CancelRequest {
   level: Level;
   scopeId: string;
 }
+
+/**
+ * `POST /api/context`: the structured context of a selection (SPEC §8.4), built from the
+ * views the session already holds. Never triggers a generation.
+ */
+export interface ContextRequest {
+  nodeIds: string[];
+  edgeIds: string[];
+  task?: string;
+}
+
+export type ContextResponse = SelectionContext;
 
 export interface FileResponse {
   path: string;
