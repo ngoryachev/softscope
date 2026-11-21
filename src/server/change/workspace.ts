@@ -11,7 +11,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, lstatSync, mkdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import type { Snapshot } from '../../shared/graph';
 import { repoSnapshot } from '../indexer/git';
@@ -45,8 +45,24 @@ interface GitResult {
   stderr: string;
 }
 
+/**
+ * The user's git configuration must not steer the bookkeeping: their hooks are theirs
+ * (a husky `prepare-commit-msg` would refuse the base commit, a `post-checkout` would run
+ * in the worktree), and `diff.noprefix`/`diff.relative`/`apply.*` settings would produce
+ * patches `git apply -p1` cannot place. A hooks path that does not exist disables hooks.
+ */
+const GIT_OVERRIDES = [
+  `core.hooksPath=${join(tmpdir(), 'softscope-no-hooks')}`,
+  'diff.noprefix=false',
+  'diff.mnemonicPrefix=false',
+  'diff.relative=false',
+  'diff.external=',
+  'apply.ignoreWhitespace=no',
+  'commit.gpgsign=false',
+].flatMap((kv) => ['-c', kv]);
+
 function git(cwd: string, args: string[], input?: string): GitResult {
-  const r = spawnSync('git', args, {
+  const r = spawnSync('git', [...GIT_OVERRIDES, ...args], {
     cwd,
     encoding: 'utf8',
     maxBuffer: 256 * 1024 * 1024,
@@ -55,6 +71,9 @@ function git(cwd: string, args: string[], input?: string): GitResult {
   if (r.error) return { ok: false, stdout: '', stderr: r.error.message };
   return { ok: r.status === 0, stdout: r.stdout, stderr: r.stderr };
 }
+
+/** A patch `git apply` (default `-p1`) can place, whatever the user's diff settings. */
+const DIFF_FLAGS = ['--binary', '--no-color', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/'];
 
 /** `SOFTSCOPE_WORK_DIR`, else `~/.softscope/changes`. */
 export function defaultWorkDir(): string {
@@ -121,7 +140,7 @@ export function createWorkspace(opts: CreateWorkspaceOptions): Workspace {
   if (!added.ok) throw new WorkspaceRefusedError(`Could not create a worktree: ${added.stderr.trim()}`);
 
   try {
-    const patch = git(repoPath, ['diff', 'HEAD', '--binary', '--no-color', '--no-ext-diff']);
+    const patch = git(repoPath, ['diff', 'HEAD', ...DIFF_FLAGS]);
     if (!patch.ok) throw new WorkspaceRefusedError(`Could not read the uncommitted changes: ${patch.stderr.trim()}`);
     if (patch.stdout.length > 0) {
       const applied = git(dir, ['apply', '--binary', '--whitespace=nowarn', '--index', '-'], patch.stdout);
@@ -146,8 +165,6 @@ export function createWorkspace(opts: CreateWorkspaceOptions): Workspace {
       'user.name=SoftZoom',
       '-c',
       'user.email=softscope@localhost',
-      '-c',
-      'commit.gpgsign=false',
       'commit',
       '--quiet',
       '--allow-empty',
@@ -198,7 +215,7 @@ export function workspaceDiff(dir: string): string {
   for (let i = 0; i < fresh.length; i += 200) {
     git(dir, ['add', '--', ...fresh.slice(i, i + 200)]);
   }
-  const r = git(dir, ['diff', '--cached', '--binary', '--no-color', '--no-ext-diff', 'HEAD']);
+  const r = git(dir, ['diff', '--cached', ...DIFF_FLAGS, 'HEAD']);
   return r.ok ? r.stdout : '';
 }
 
