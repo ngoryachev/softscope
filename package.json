@@ -1,0 +1,39 @@
+{
+  "name": "softscope",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SoftZoom \u2014 AI-generated, code-grounded visual exploration of a local repository",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "prestart": "vite build",
+    "start": "tsx src/server/index.ts",
+    "dev:server": "tsx watch src/server/index.ts",
+    "dev:web": "vite",
+    "build": "vite build",
+    "typecheck": "tsc -b",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.268",
+    "@dagrejs/dagre": "^1.1.4",
+    "@hono/node-server": "^1.13.7",
+    "@xyflow/react": "^12.3.5",
+    "hono": "^4.6.13",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.7.2",
+    "zod": "^4.1.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tsx": "^4.19.2",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.8"
+  }
+}
