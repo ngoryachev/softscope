@@ -10,7 +10,7 @@
  * a plain click replaces this level's part of it, Shift/Ctrl/Cmd+click toggles, a
  * marquee adds. The ContextPanel turns the basket into the structured AI context.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { GraphResponse, ProgressEvent, RepoState, ValidationIssue } from '../shared/api';
 import {
   expandSelection,
@@ -89,6 +89,8 @@ export function App() {
   const [focused, setFocused] = useState<SelectableRef | null>(null);
   /** Every view loaded since the repository was opened, by `level:scope` — the context is built over these. */
   const [views, setViews] = useState<Map<string, GraphView>>(() => new Map());
+  // A stable array, so the ContextPanel does not rebuild the context on every poll tick.
+  const loadedViews = useMemo(() => [...views.values()], [views]);
   const [viewing, setViewing] = useState<Evidence | null>(null);
   const requestId = useRef(0);
   /** Cancel was pressed before the server had a job for the scope; apply it once it does. */
@@ -416,7 +418,7 @@ export function App() {
                 onGoToSubsystem={goToSubsystem}
               />
               <ContextPanel
-                views={[...views.values()]}
+                views={loadedViews}
                 currentView={response.view}
                 basket={basket}
                 live={live}

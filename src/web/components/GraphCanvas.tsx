@@ -289,6 +289,9 @@ export function GraphCanvas({ view, basket, focused, onSelect, onMarquee, onClea
         multiSelectionKeyCode={MULTI_SELECT_KEYS}
         fitView
         proOptions={{ hideAttribution: true }}
+        // The canvas owns its node state now, so React Flow's Backspace/Delete handling
+        // would really remove a selected node from the diagram. The schema is read-only.
+        deleteKeyCode={null}
         nodesConnectable={false}
         nodesDraggable
         minZoom={0.2}
