@@ -7,6 +7,7 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { appendFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { FakeSchemaAgent, indexDerivedReply } from '../src/server/agent/fake';
+import type { SchemaAgent } from '../src/server/agent/types';
 import { summarizeForAgent } from '../src/server/indexer/index';
 import { LevelNotSupportedError, RepoSession, ScopeNotFoundError } from '../src/server/session';
 import type { FileCache } from '../src/server/cache/file-cache';
@@ -16,6 +17,7 @@ import {
   commitAll,
   copyFixture,
   copyFixtureAsGitRepo,
+  gitCheckout,
   switchToNewBranch,
   tempCache,
 } from './helpers';
@@ -283,6 +285,48 @@ describe('snapshot changes', () => {
     expect(agent.calls).toHaveLength(1);
   });
 
+  it('serves a cached L3 marked stale under a stale L4, and lets each be regenerated on its own', async () => {
+    await session.graph({ level: 'L4', scopeId: 'root' });
+    await session.graph({ level: 'L3', scopeId: CORE_ID });
+    appendFileSync(join(repo, 'packages/core/src/math.ts'), '\nexport const four = 4;\n');
+    commitAll(repo, 'second');
+
+    // A deep link into the subsystem after the commit: both levels come from the cache.
+    const later = newSession();
+    const core = await later.graph({ level: 'L3', scopeId: CORE_ID });
+    expect(core.cached).toBe(true);
+    expect(core.stale).toBe(true);
+    expect(core.view.nodes.map((n) => n.title)).toEqual(['arithmetic', 'schema']);
+    expect(agent.calls).toHaveLength(2);
+
+    // Regenerating the L3 pins it to the new commit; the L4 above it stays stale until
+    // the user asks for it too — and neither regeneration touches the other scope.
+    const freshCore = await later.graph({ level: 'L3', scopeId: CORE_ID, refresh: true });
+    expect(freshCore.stale).toBe(false);
+    expect(agent.callsFor('L3', CORE_ID)).toBe(2);
+    expect(agent.callsFor('L4', 'root')).toBe(1);
+    expect((await later.graph({ level: 'L4', scopeId: 'root' })).stale).toBe(true);
+    expect((await later.graph({ level: 'L3', scopeId: CORE_ID })).stale).toBe(false);
+    expect(agent.calls).toHaveLength(3);
+  });
+
+  it('falls back to the most recently generated schema when several commits are cached', async () => {
+    const first = await session.graph({ level: 'L4', scopeId: 'root' });
+    appendFileSync(join(repo, 'packages/core/src/math.ts'), '\nexport const five = 5;\n');
+    commitAll(repo, 'second');
+    // storedAt has millisecond resolution; keep the two generations apart.
+    await new Promise((r) => setTimeout(r, 5));
+    const second = await newSession().graph({ level: 'L4', scopeId: 'root', refresh: true });
+    appendFileSync(join(repo, 'packages/core/src/math.ts'), '\nexport const six = 6;\n');
+    commitAll(repo, 'third');
+
+    const third = await newSession().graph({ level: 'L4', scopeId: 'root' });
+    expect(third.stale).toBe(true);
+    expect(third.view.snapshot.commit).toBe(second.view.snapshot.commit);
+    expect(third.view.snapshot.commit).not.toBe(first.view.snapshot.commit);
+    expect(agent.calls).toHaveLength(2);
+  });
+
   it('re-validates a cached reply against the files that are on disk now', async () => {
     // A reply cached for the current state, citing a file that does not exist. Evidence
     // is checked on every read, so a cache hit cannot resurrect a stale node.
@@ -362,6 +406,49 @@ describe('a directory without git', () => {
     await s.graph({ level: 'L4', scopeId: 'root', refresh: true });
     expect(plainAgent.calls).toHaveLength(2);
     expect(plainAgent.calls.at(-1)!.index.files).toContain('src/added.ts');
+  });
+});
+
+describe('which cached schema may be reused', () => {
+  it('never serves a schema that another agent produced', async () => {
+    // SOFTSCOPE_FAKE_AGENT derives graphs from the index without reading any code, so
+    // its replies must not surface in a session that talks to Claude, or the reverse.
+    const fakeReply = agentGraph([
+      { slug: 'app', title: 'from the fake', evidence: [{ file: 'package.json', startLine: 1, endLine: 1 }] },
+    ]);
+    await new RepoSession(repo, { agent: new FakeSchemaAgent({ replies: { 'L4:root': fakeReply } }), cache }).graph({
+      level: 'L4',
+      scopeId: 'root',
+    });
+
+    // Same repository, same state, same scope — but an agent under a different name.
+    const scripted = new FakeSchemaAgent({ replies: { 'L4:root': l4Reply } });
+    const asClaude: SchemaAgent = { name: 'claude-agent-sdk', generate: (r) => scripted.generate(r) };
+    const response = await new RepoSession(repo, { agent: asClaude, cache }).graph({ level: 'L4', scopeId: 'root' });
+
+    expect(response.cached).toBe(false);
+    expect(scripted.calls).toHaveLength(1);
+    expect(response.view.nodes.map((n) => n.title)).not.toContain('from the fake');
+  });
+
+  it('falls back to the schema of the current commit rather than a newer one', async () => {
+    const atFirstCommit = await session.graph({ level: 'L4', scopeId: 'root' });
+    const firstCommit = atFirstCommit.view.snapshot.commit;
+
+    appendFileSync(join(repo, 'packages/core/src/math.ts'), '\nexport const four = 4;\n');
+    commitAll(repo, 'second');
+    const atSecondCommit = await session.graph({ level: 'L4', scopeId: 'root', refresh: true });
+    expect(atSecondCommit.view.snapshot.commit).not.toBe(firstCommit);
+
+    // Back on the first commit with an uncommitted edit: its own schema is the closest
+    // description of the code on disk, even though the other one was generated later.
+    gitCheckout(repo, firstCommit);
+    appendFileSync(join(repo, 'packages/core/src/math.ts'), '\nexport const five = 5;\n');
+
+    const fallback = await newSession().graph({ level: 'L4', scopeId: 'root' });
+    expect(fallback.cached).toBe(true);
+    expect(fallback.stale).toBe(true);
+    expect(fallback.view.snapshot.commit).toBe(firstCommit);
   });
 });
 

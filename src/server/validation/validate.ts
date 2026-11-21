@@ -228,13 +228,6 @@ export function validateView({ repoPath, scope, snapshot, raw }: ValidateOptions
       : edge.confirmed
         ? 'no evidence survived validation against the current code'
         : edge.reason || 'the agent could not confirm this relation';
-    if (!confirmed) {
-      issues.push({
-        kind: 'edge-unverified',
-        message: `Edge ${edge.kind} ${from} -> ${to} is unverified: ${why}.`,
-        edgeId: id,
-      });
-    }
     const existing = byId.get(id);
     if (!existing) {
       byId.set(id, {
@@ -263,7 +256,18 @@ export function validateView({ repoPath, scope, snapshot, raw }: ValidateOptions
     }
     if (edge.label && !existing.label) existing.label = edge.label;
   }
-  edges.push(...byId.values());
+  // Reported once per surviving edge, after every mention of it has been merged: a
+  // relation that any mention confirms is confirmed, and must not also be listed as
+  // unverified in the panel the user reads next to the graph.
+  for (const edge of byId.values()) {
+    edges.push(edge);
+    if (edge.status !== 'unverified') continue;
+    issues.push({
+      kind: 'edge-unverified',
+      message: `Edge ${edge.kind} ${edge.from} -> ${edge.to} is unverified: ${edge.reason}.`,
+      edgeId: edge.id,
+    });
+  }
 
   return {
     view: {

@@ -40,6 +40,26 @@ export function defaultCacheRoot(): string {
     : join(homedir(), '.softscope', 'cache');
 }
 
+/**
+ * Orders fallback candidates. An entry for the preferred repository state wins over a
+ * merely newer one: a dirty state id is `<commit>+<fingerprint>`, so an entry for the
+ * same commit describes the code on disk far more closely than the schema of another
+ * commit that happens to have been generated later.
+ */
+function isBetter(
+  candidate: { stateId: string; storedAt: string },
+  best: { stateId: string; storedAt: string },
+  prefer?: { statePrefix: string },
+): boolean {
+  if (prefer) {
+    const candidateMatches = candidate.stateId.startsWith(prefer.statePrefix);
+    const bestMatches = best.stateId.startsWith(prefer.statePrefix);
+    if (candidateMatches !== bestMatches) return candidateMatches;
+  }
+  // storedAt is an ISO timestamp, so a string comparison orders it correctly.
+  return candidate.storedAt > best.storedAt;
+}
+
 /** Safe file name part for an id the agent chose. */
 function slug(id: string): string {
   const safe = id.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
@@ -94,7 +114,10 @@ export class FileCache {
    * (SPEC §9.1: invalidate the affected parts, §9.4: never present a stale schema as
    * current).
    */
-  latest<T>(key: Omit<CacheKey, 'stateId'>): { value: T; stateId: string; storedAt: string } | null {
+  latest<T>(
+    key: Omit<CacheKey, 'stateId'>,
+    prefer?: { statePrefix: string },
+  ): { value: T; stateId: string; storedAt: string } | null {
     const dir = join(this.root, `v${CACHE_VERSION}`, short(resolve(key.repoPath), 12));
     let states: string[];
     try {
@@ -121,10 +144,8 @@ export class FileCache {
       ) {
         continue;
       }
-      // storedAt is an ISO timestamp, so a string comparison orders it correctly.
-      if (!best || envelope.storedAt > best.storedAt) {
-        best = { value: envelope.value, stateId: k.stateId, storedAt: envelope.storedAt };
-      }
+      const candidate = { value: envelope.value, stateId: k.stateId, storedAt: envelope.storedAt };
+      if (!best || isBetter(candidate, best, prefer)) best = candidate;
     }
     return best;
   }

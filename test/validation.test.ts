@@ -156,7 +156,7 @@ describe('edges', () => {
   });
 
   it('merges a relation the agent cited twice instead of dropping the second mention', () => {
-    const { view } = run(
+    const { view, issues } = run(
       agentGraph(
         [
           { slug: 'a', evidence: [{ file: 'src/index.ts', startLine: 1, endLine: 1 }] },
@@ -173,6 +173,30 @@ describe('edges', () => {
     // The evidence of both mentions is kept, and the confirmed one wins the status.
     expect(view.edges[0]).toMatchObject({ status: 'confirmed', reason: '' });
     expect(view.edges[0]!.evidence).toEqual([{ file: 'src/index.ts', startLine: 4, endLine: 4 }]);
+    expect(issues.filter((i) => i.kind === 'edge-unverified')).toHaveLength(0);
+  });
+
+  it('does not report a merged relation as unverified when its first mention was confirmed', () => {
+    // Same relation as above, mentions in the other order: the result must not depend
+    // on which mention the agent happened to list first, and the issues shown to the
+    // user must describe the edge that is actually in the view.
+    const { view, issues } = run(
+      agentGraph(
+        [
+          { slug: 'a', evidence: [{ file: 'src/index.ts', startLine: 1, endLine: 1 }] },
+          { slug: 'b', evidence: [{ file: 'src/util/log.ts', startLine: 1, endLine: 1 }] },
+        ],
+        [
+          { from: 'a', to: 'b', kind: 'calls', evidence: [{ file: 'src/index.ts', startLine: 4, endLine: 4 }] },
+          { from: 'a', to: 'b', kind: 'calls', confirmed: false, reason: 'only a guess', evidence: [] },
+        ],
+      ),
+    );
+
+    expect(view.edges).toHaveLength(1);
+    expect(view.edges[0]).toMatchObject({ status: 'confirmed', reason: '' });
+    expect(view.edges[0]!.evidence).toEqual([{ file: 'src/index.ts', startLine: 4, endLine: 4 }]);
+    expect(issues.filter((i) => i.kind === 'edge-unverified')).toHaveLength(0);
   });
 
   it('marks a fully evidenced edge confirmed', () => {

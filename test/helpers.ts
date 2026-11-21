@@ -47,6 +47,11 @@ export function copyFixtureAsGitRepo(): string {
   return dir;
 }
 
+/** Detached checkout of an earlier commit. */
+export function gitCheckout(dir: string, ref: string): void {
+  git(dir, ['checkout', '--quiet', '--force', ref]);
+}
+
 /** A new branch at the same commit: the code is unchanged, only the label moves. */
 export function switchToNewBranch(dir: string, name: string): void {
   git(dir, ['checkout', '--quiet', '-b', name]);

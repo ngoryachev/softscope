@@ -87,6 +87,21 @@ describe('latest entry for a scope', () => {
     expect(latest?.stateId).toBe('newer');
   });
 
+  it('prefers an entry of the given commit over one that is merely newer', async () => {
+    const cache = tempCache();
+    const key = baseKey('/tmp/repo-a');
+    cache.set({ ...key, stateId: 'commitA' }, { marker: 'commitA' });
+    await new Promise((r) => setTimeout(r, 5));
+    cache.set({ ...key, stateId: 'commitB' }, { marker: 'commitB' });
+
+    const scope = { repoPath: key.repoPath, level: 'L4' as const, scopeId: 'root' };
+    // Checked out at commitA again with a dirty tree: the schema of commitA describes
+    // the code on disk, the newer one of commitB does not.
+    expect(cache.latest<{ marker: string }>(scope, { statePrefix: 'commitA' })?.value).toEqual({ marker: 'commitA' });
+    expect(cache.latest<{ marker: string }>(scope, { statePrefix: 'commitC' })?.value).toEqual({ marker: 'commitB' });
+    expect(cache.latest<{ marker: string }>(scope)?.value).toEqual({ marker: 'commitB' });
+  });
+
   it('ignores other scopes, other levels, other repositories and an empty cache', () => {
     const cache = tempCache();
     const key = baseKey('/tmp/repo-a');

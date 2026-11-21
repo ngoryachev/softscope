@@ -6,7 +6,7 @@ import { FakeSchemaAgent } from '../src/server/agent/fake';
 import { RepoSession } from '../src/server/session';
 import type { FileResponse, GraphResponse, RepoState } from '../src/shared/api';
 import type { Snapshot } from '../src/shared/graph';
-import { agentGraph, cleanupTemps, copyFixtureAsGitRepo, tempCache } from './helpers';
+import { agentGraph, cleanupTemps, commitAll, copyFixtureAsGitRepo, tempCache } from './helpers';
 
 afterAll(cleanupTemps);
 
@@ -151,6 +151,31 @@ describe('/api/graph', () => {
     const snapshot = (await (await app.request('/api/snapshot')).json()) as Snapshot;
     expect(snapshot.dirty).toBe(true);
     expect(snapshot.stateId).not.toBe(before.view.snapshot.stateId);
+  });
+
+  it('serves the previous schema as cached and stale after a commit, and regenerates with refresh=1', async () => {
+    const app = build();
+    const before = (await (await app.request('/api/graph')).json()) as GraphResponse;
+
+    appendFileSync(join(repo, 'src/util/log.ts'), '\nexport const extra = 2;\n');
+    commitAll(repo, 'second');
+
+    const after = (await (await app.request('/api/graph')).json()) as GraphResponse;
+    expect(after.cached).toBe(true);
+    expect(after.stale).toBe(true);
+    expect(after.view.snapshot.commit).toBe(before.view.snapshot.commit);
+    expect(agent.calls).toHaveLength(1);
+
+    const fresh = (await (await app.request('/api/graph?level=L4&scope=root&refresh=1')).json()) as GraphResponse;
+    expect(fresh.cached).toBe(false);
+    expect(fresh.stale).toBe(false);
+    expect(fresh.view.snapshot.commit).not.toBe(before.view.snapshot.commit);
+    expect(agent.calls).toHaveLength(2);
+
+    const again = (await (await app.request('/api/graph')).json()) as GraphResponse;
+    expect(again.cached).toBe(true);
+    expect(again.stale).toBe(false);
+    expect(agent.calls).toHaveLength(2);
   });
 
   it('answers 404 for a scope that no view offers', async () => {

@@ -190,7 +190,7 @@ export class RepoSession {
    *    fresh schema, through Regenerate (`refresh`).
    */
   private reusable(key: CacheKey, live: Snapshot): CachedGeneration | null {
-    const exact = this.deps.cache.get<CachedGeneration>(key);
+    const exact = this.sameAgent(this.deps.cache.get<CachedGeneration>(key));
     if (exact) {
       // The key pins the commit and the working tree, so the code behind this entry is
       // the code on disk; only the branch label can differ, when a branch was created
@@ -198,7 +198,20 @@ export class RepoSession {
       if (sameState(exact.snapshot, live)) return exact;
       return { ...exact, snapshot: { ...exact.snapshot, branch: live.branch } };
     }
-    return this.deps.cache.latest<CachedGeneration>(key)?.value ?? null;
+    // Prefer a schema of the same commit over one of another commit that merely happens
+    // to be newer: with a dirty tree it is the closest description of the code on disk.
+    const previous = this.deps.cache.latest<CachedGeneration>(key, { statePrefix: live.commit });
+    return this.sameAgent(previous?.value);
+  }
+
+  /**
+   * A schema is only reusable if the agent that produced it is the agent in use now.
+   * The fake agent derives its graphs from the index without reading any code, so one
+   * of its replies must never be served to a session that talks to Claude, or the other
+   * way round — the user would be shown a schema that is not what they asked for.
+   */
+  private sameAgent(generation: CachedGeneration | null | undefined): CachedGeneration | null {
+    return generation && generation.agent === this.deps.agent.name ? generation : null;
   }
 
   /**
