@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist/types/test",
+    "rootDir": ".",
+    "types": ["node"],
+    "lib": ["ES2022", "DOM"],
+    "jsx": "react-jsx"
+  },
+  "include": ["test/**/*.ts"],
+  "exclude": ["test/fixtures"],
+  "references": [{ "path": "./src/shared" }, { "path": "./src/server" }, { "path": "./src/web" }]
+}

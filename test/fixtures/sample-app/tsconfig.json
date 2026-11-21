@@ -1,0 +1,12 @@
+{
+  // A baseUrl and a path alias, so the import resolver has both to map.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "baseUrl": ".",
+    "paths": {
+      "@app/*": ["src/*"]
+    }
+  },
+  "include": ["src"]
+}

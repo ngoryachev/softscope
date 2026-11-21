@@ -1,0 +1,19 @@
+{
+  "name": "sample-app",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/*"],
+  "main": "src/index.ts",
+  "bin": { "sample": "src/cli.ts" },
+  "scripts": {
+    "start": "node src/index.ts",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "hono": "^4.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}
