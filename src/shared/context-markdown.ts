@@ -12,10 +12,12 @@ export function formatRange(file: string, range: LineRange): string {
     : `${file}:${range.startLine}-${range.endLine}`;
 }
 
+/** `#3 a → b (calls, label, async) — confirmed`; the position and style only for sequence messages. */
 function relationLine(r: ContextRelation): string {
-  const detail = [r.kind, r.label].filter(Boolean).join(', ');
+  const detail = [r.kind, r.label, r.style].filter(Boolean).join(', ');
   const status = r.status === 'unverified' && r.reason ? `unverified: ${r.reason}` : r.status;
-  return `- ${r.from.title} → ${r.to.title} (${detail}) — ${status}`;
+  const position = r.order !== undefined ? `#${r.order} ` : '';
+  return `- ${position}${r.from.title} → ${r.to.title} (${detail}) — ${status}`;
 }
 
 export function renderContextMarkdown(context: SelectionContext): string {

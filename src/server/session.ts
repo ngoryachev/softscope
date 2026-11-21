@@ -5,9 +5,9 @@
  * Generation is always lazy and scoped (SPEC §4.4): nothing is generated until the user
  * opens that scope, and opening one application never touches its neighbours.
  */
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { statSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import type { AgentGraph } from '../shared/agent-schema';
 import type { GraphResponse, ProgressEvent, RepoState } from '../shared/api';
 import {
@@ -89,6 +89,11 @@ export interface GraphRequest {
 }
 
 export class RepoSession {
+  /**
+   * The real, absolute path of the repository: symlinks and `..` resolved, so the same
+   * directory spelled two ways is one session (and one cache partition — a repository
+   * that used to be opened through a symlink is re-generated once after this change).
+   */
   readonly repoPath: string;
   private readonly scopes = new Map<string, ScopeRef>();
   private readonly views = new Map<string, GraphView>();
@@ -102,10 +107,14 @@ export class RepoSession {
     repoPath: string,
     private readonly deps: SessionDeps,
   ) {
-    this.repoPath = resolve(repoPath);
-    const st = statSync(this.repoPath);
-    if (!st.isDirectory()) throw new Error(`${this.repoPath} is not a directory.`);
-    if (this.deps.cache.root.startsWith(`${this.repoPath}/`)) {
+    const given = resolve(repoPath);
+    const st = statSync(given);
+    if (!st.isDirectory()) throw new Error(`${given} is not a directory.`);
+    this.repoPath = realpathSync(given);
+    // Like with like: `repoPath` is a real path, so the cache root is compared as one too —
+    // a cache spelled through a symlink into the repository must be caught as well.
+    const cacheRoot = realPathOfIntended(this.deps.cache.root);
+    if (cacheRoot === this.repoPath || cacheRoot.startsWith(`${this.repoPath}/`)) {
       throw new Error('The cache directory must not live inside the analyzed repository.');
     }
     this.changes = new ChangeManager(this, {
@@ -385,6 +394,26 @@ export class RepoSession {
 
 function key(level: Level, scopeId: string): string {
   return `${level}:${scopeId}`;
+}
+
+/**
+ * The real path a directory would have once created: the deepest existing ancestor is
+ * resolved through its symlinks, the missing tail is appended as spelled. A cache root
+ * usually does not exist before the first write, so `realpathSync` alone cannot be used.
+ */
+function realPathOfIntended(path: string): string {
+  const missing: string[] = [];
+  let current = resolve(path);
+  for (;;) {
+    try {
+      return join(realpathSync(current), ...missing.reverse());
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return resolve(path);
+      missing.push(basename(current));
+      current = parent;
+    }
+  }
 }
 
 function parentOfLevel(level: Level): Level | null {

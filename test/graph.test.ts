@@ -24,6 +24,7 @@ import {
   type GraphView,
   type Snapshot,
 } from '../src/shared/graph';
+import { SUPPORTED } from './helpers';
 
 const snapshot: Snapshot = {
   branch: 'main',
@@ -84,6 +85,7 @@ const view: GraphView = {
   ],
   notes: [],
   snapshot,
+  behavior: SUPPORTED,
 };
 
 describe('levels and ids', () => {
@@ -242,6 +244,7 @@ describe('selection context (SPEC 8.4)', () => {
     ],
     notes: [],
     snapshot,
+    behavior: SUPPORTED,
   };
   const l3View: GraphView = {
     scope: l3Scope,
@@ -253,6 +256,7 @@ describe('selection context (SPEC 8.4)', () => {
     edges: [edge(httpId, jobsId, { id: edgeId(l3Scope, httpId, jobsId, 'calls'), kind: 'calls', evidence: [{ file: 'src/http/server.ts', startLine: 5, endLine: 12 }] })],
     notes: [],
     snapshot,
+    behavior: SUPPORTED,
   };
 
   it('reads the owning view out of node and edge ids', () => {
@@ -411,6 +415,7 @@ describe('agent reply contract', () => {
         memberOf: [],
         paths: ['src'],
         hasDetail: true,
+        role: '',
       },
     ],
     edges: [
@@ -422,8 +427,12 @@ describe('agent reply contract', () => {
         evidence: [],
         confirmed: false,
         reason: 'placeholder',
+        order: 0,
+        style: '',
+        group: '',
       },
     ],
+    behavior: { supported: true, reason: '' },
   };
 
   it('parses a reply that matches the schema', () => {
@@ -509,6 +518,7 @@ describe('selection context — edge cases', () => {
       edges: [],
       notes: [],
       snapshot,
+      behavior: SUPPORTED,
     };
     const l3: GraphView = {
       scope: l3Scope,
@@ -517,6 +527,7 @@ describe('selection context — edge cases', () => {
       edges: [],
       notes: [],
       snapshot: { ...snapshot, branch: 'feature' },
+      behavior: SUPPORTED,
     };
     const context = buildSelectionContext([l4, l3], { nodeIds: [appId, httpId], edgeIds: [] }, { live: snapshot });
     expect(context.snapshots.map((s) => [s.branch, s.scopes.map((sc) => sc.level)])).toEqual([

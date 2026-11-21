@@ -5,7 +5,7 @@
  * The app is a factory taking its dependencies, so tests drive it through
  * `app.request()` with a fake agent and a temporary cache.
  */
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
@@ -179,9 +179,10 @@ export function createApp(deps: AppDeps): SoftscopeApp {
     } catch {
       return c.json({ error: `${path} does not exist.` }, 400);
     }
-    // The same repository again (a second browser tab, a reload that re-posts the path):
-    // the session stays, and with it the open change.
-    if (session && session.repoPath === path) return c.json(session.state());
+    // The same repository again (a second browser tab, a reload that re-posts the path,
+    // a symlink or a `..` spelling of the open directory): the session stays, and with
+    // it the open change. `session.repoPath` is the real path, so compare real paths.
+    if (session && session.repoPath === realpathSync(path)) return c.json(session.state());
     // Another repository: the old session's open change would be unreachable from now
     // on, so it is cancelled and its worktree removed before the switch.
     if (session) await session.close();

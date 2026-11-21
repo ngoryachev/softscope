@@ -3,7 +3,16 @@
  * subsystems it belongs to, and the code links that back it up. The selection basket
  * and the structured context built from it live in the ContextPanel next door.
  */
-import { edgesOf, findNode, membersOf, subsystemsOf, type Evidence, type GraphView } from '../../shared/graph';
+import {
+  findNode,
+  membersOf,
+  sequenceOrdered,
+  subsystemsOf,
+  type Evidence,
+  type GraphEdge,
+  type GraphView,
+  type NodeRole,
+} from '../../shared/graph';
 import type { SelectableRef } from './GraphCanvas';
 
 export interface InspectorProps {
@@ -17,6 +26,28 @@ export interface InspectorProps {
   onSelectNode: (id: string) => void;
   /** A boundary node names the subsystem it belongs to; this takes the user there. */
   onGoToSubsystem?: (subsystemId: string) => void;
+}
+
+/** How a behaviour role reads in a badge: "initial state", "decision", "participant". */
+export function roleLabel(role: NodeRole): string {
+  switch (role) {
+    case 'initial':
+      return 'initial state';
+    case 'final':
+      return 'final state';
+    case 'state':
+      return 'state';
+    default:
+      return role;
+  }
+}
+
+/** "message #3 (async)" for a sequence message, "transition" for a state machine edge, else the kind. */
+export function edgeHeading(view: GraphView, edge: GraphEdge): string {
+  if (edge.order !== undefined) return `message #${edge.order}${edge.style ? ` (${edge.style})` : ''}`;
+  if (view.diagramKind === 'state-machine') return `transition${edge.label ? `: ${edge.label}` : ''}`;
+  if (view.diagramKind === 'flow' && edge.label) return `branch: ${edge.label}`;
+  return edge.kind;
 }
 
 /** The title of a sibling subsystem, or the readable tail of its id when the view is not at hand. */
@@ -69,10 +100,14 @@ export function Inspector({
         <p className="sz-muted">
           {view.scope.level} · {view.diagramKind} · {view.nodes.length} nodes, {view.edges.length} relations
         </p>
-        <p className="sz-muted">
-          Click a node or a relation to inspect it. Shift/Ctrl+click or drag a rectangle to select several for the
-          context. Double-click a node to open it one level deeper.
-        </p>
+        {!view.behavior.supported ? (
+          <p className="sz-warn">No behaviour view could be built: {view.behavior.reason}</p>
+        ) : (
+          <p className="sz-muted">
+            Click a node or a relation to inspect it. Shift/Ctrl+click or drag a rectangle to select several for the
+            context.{view.scope.level === 'L1' ? '' : ' Double-click a node to open it one level deeper.'}
+          </p>
+        )}
         {view.notes.length > 0 ? (
           <section>
             <h3>What the analysis could not establish</h3>
@@ -91,12 +126,15 @@ export function Inspector({
     return (
       <aside className="sz-inspector">
         <h2>
-          {edge.kind}
+          {edgeHeading(view, edge)}
           {edge.status === 'unverified' ? <span className="sz-badge sz-badge-warn">unverified</span> : null}
         </h2>
         <p className="sz-muted">
           {findNode(view, edge.from)?.title ?? edge.from} → {findNode(view, edge.to)?.title ?? edge.to}
+          {edge.order !== undefined || view.diagramKind === 'state-machine' ? ` (${edge.kind})` : ''}
         </p>
+        {edge.label && edge.order !== undefined ? <p>{edge.label}</p> : null}
+        {edge.group ? <p className="sz-muted">in {edge.group}</p> : null}
         {edge.status === 'unverified' ? <p className="sz-warn">{edge.reason}</p> : null}
         <section>
           <h3>Code</h3>
@@ -108,13 +146,15 @@ export function Inspector({
 
   const owners = subsystemsOf(view, node!);
   const children = membersOf(view, node!);
-  const related = edgesOf(view, node!.id);
+  // In reading order: a sequence's messages by their number, anything else as listed.
+  const related = sequenceOrdered(view).filter((e) => e.from === node!.id || e.to === node!.id);
 
   return (
     <aside className="sz-inspector">
       <h2>
         {node!.title}
         {node!.boundary ? <span className="sz-badge">boundary</span> : null}
+        {node!.role ? <span className="sz-badge sz-badge-role">{roleLabel(node!.role)}</span> : null}
       </h2>
       <p className="sz-muted">{node!.kind}</p>
       <p>{node!.summary || <span className="sz-muted">No description.</span>}</p>
@@ -168,9 +208,10 @@ export function Inspector({
           <ul className="sz-relations">
             {related.map((e) => (
               <li key={e.id}>
+                {e.order !== undefined ? <span className="sz-muted">#{e.order} </span> : null}
                 {e.from === node!.id ? '→ ' : '← '}
                 {findNode(view, e.from === node!.id ? e.to : e.from)?.title}
-                <span className="sz-muted"> ({e.kind})</span>
+                <span className="sz-muted"> ({[e.kind, e.label, e.style].filter(Boolean).join(', ')})</span>
                 {e.status === 'unverified' ? <span className="sz-badge sz-badge-warn">unverified</span> : null}
               </li>
             ))}

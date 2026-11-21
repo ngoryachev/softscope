@@ -4,7 +4,8 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { AgentGraph } from '../src/shared/agent-schema';
+import type { AgentBehavior, AgentGraph } from '../src/shared/agent-schema';
+import type { BehaviorInfo } from '../src/shared/graph';
 import { FileCache } from '../src/server/cache/file-cache';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -104,16 +105,28 @@ export interface NodeSpec {
   memberOf?: string[];
   paths?: string[];
   hasDetail?: boolean;
+  /** L1: initial | final | state, participant, start | end | step | decision. */
+  role?: string;
 }
 
 export interface EdgeSpec {
   from: string;
   to: string;
   kind?: string;
+  label?: string;
   evidence?: Array<{ file: string; startLine: number; endLine: number }>;
   confirmed?: boolean;
   reason?: string;
+  /** L1 sequence: 1-based message position. */
+  order?: number;
+  /** L1 sequence: sync | async | return. */
+  style?: string;
+  /** L1 sequence: branch or loop label. */
+  group?: string;
 }
+
+/** What every L4–L2 view and every supported L1 view carries. */
+export const SUPPORTED: BehaviorInfo = { supported: true, reason: '' };
 
 /** Builds an agent reply without repeating every required field in each test. */
 export function agentGraph(nodes: NodeSpec[], edges: EdgeSpec[] = [], extra?: Partial<AgentGraph>): AgentGraph {
@@ -134,19 +147,34 @@ export function agentGraph(nodes: NodeSpec[], edges: EdgeSpec[] = [], extra?: Pa
       memberOf: n.memberOf ?? [],
       paths: n.paths ?? [],
       hasDetail: n.hasDetail ?? false,
+      role: n.role ?? '',
     })),
     edges: edges.map((e) => ({
       from: e.from,
       to: e.to,
       kind: e.kind ?? 'imports',
-      label: '',
+      label: e.label ?? '',
       evidence: (e.evidence ?? [{ file: 'package.json', startLine: 1, endLine: 1 }]).map((ev) => ({
         ...ev,
         note: '',
       })),
       confirmed: e.confirmed ?? true,
       reason: e.reason ?? '',
+      order: e.order ?? 0,
+      style: e.style ?? '',
+      group: e.group ?? '',
     })),
+    behavior: { supported: true, reason: '' },
     ...extra,
   };
+}
+
+/** An L1 reply: a behaviour kind with its states/participants/steps, or `unsupported` with a reason. */
+export function l1Graph(
+  kind: 'state-machine' | 'sequence' | 'flow' | 'unsupported',
+  nodes: NodeSpec[],
+  edges: EdgeSpec[] = [],
+  behavior: AgentBehavior = kind === 'unsupported' ? { supported: false, reason: 'no reason given' } : { supported: true, reason: '' },
+): AgentGraph {
+  return agentGraph(nodes, edges, { diagramKind: kind, behavior });
 }

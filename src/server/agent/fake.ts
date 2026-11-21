@@ -3,7 +3,9 @@
  *
  * Used by every test (no tokens, no network) and by `SOFTSCOPE_FAKE_AGENT=1` for UI work.
  */
-import { emptyAgentGraph, type AgentGraph } from '../../shared/agent-schema';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { emptyAgentGraph, type AgentEvidence, type AgentGraph } from '../../shared/agent-schema';
 import type { Level } from '../../shared/graph';
 import { AgentError, type AgentActivity, type GenerateRequest, type SchemaAgent } from './types';
 
@@ -85,6 +87,10 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
  * A plausible reply derived from the index alone — enough to click through the UI with
  * `SOFTSCOPE_FAKE_AGENT=1`. Not an analysis: every node points at a real file so that
  * validation keeps it, and every edge is marked unconfirmed because nothing was read.
+ *
+ * L1 is decided from the scope paths alone (see `behaviorReply`): a file named like a
+ * state machine gets one, a server/http/cli file gets a sequence, anything else is
+ * `unsupported` — so the whole L4 → L1 path can be clicked through without Claude.
  */
 export function indexDerivedReply(req: GenerateRequest): AgentGraph {
   const { index, scope } = req;
@@ -95,6 +101,8 @@ export function indexDerivedReply(req: GenerateRequest): AgentGraph {
 
   const inScope = (file: string) =>
     scope.paths.includes('.') || scope.paths.some((p) => file === p || file.startsWith(`${p.replace(/\/+$/, '')}/`));
+
+  if (scope.level === 'L1') return behaviorReply(req, graph);
 
   if (scope.level === 'L4') {
     // The workspace packages are the applications; the root package is one too unless
@@ -115,6 +123,7 @@ export function indexDerivedReply(req: GenerateRequest): AgentGraph {
         memberOf: [],
         paths: [pkg.dir === '.' ? 'src' : pkg.dir],
         hasDetail: true,
+        role: '',
       });
     }
     for (const external of index.imports.externals.slice(0, 4)) {
@@ -131,6 +140,7 @@ export function indexDerivedReply(req: GenerateRequest): AgentGraph {
         memberOf: [],
         paths: [],
         hasDetail: false,
+        role: '',
       });
     }
   } else {
@@ -152,9 +162,10 @@ export function indexDerivedReply(req: GenerateRequest): AgentGraph {
         subsystemId: '',
         memberOf: [],
         paths: [dir],
-        // A module group at L3 can be opened into its L2, so the UI's whole path can be
-        // clicked through without Claude.
-        hasDetail: scope.level === 'L3',
+        // A module group at L3 opens into its L2, and at L2 into its L1 behaviour view,
+        // so the UI's whole path can be clicked through without Claude.
+        hasDetail: true,
+        role: '',
       });
     }
   }
@@ -169,7 +180,157 @@ export function indexDerivedReply(req: GenerateRequest): AgentGraph {
       evidence: [],
       confirmed: false,
       reason: 'the fake agent does not read code',
+      order: 0,
+      style: '',
+      group: '',
     });
   }
   return graph;
+}
+
+/** Counts lines the way validation does: a trailing newline does not add a line. */
+function lineCount(repoPath: string, file: string): number {
+  try {
+    const text = readFileSync(join(repoPath, file), 'utf8');
+    if (text.length === 0) return 0;
+    const lines = text.split('\n');
+    if (lines[lines.length - 1] === '') lines.pop();
+    return lines.length;
+  } catch {
+    return 0;
+  }
+}
+
+const baseName = (file: string) => file.slice(file.lastIndexOf('/') + 1);
+
+/**
+ * The deterministic L1 of the fake agent, decided from the files directly inside the
+ * scope paths and nothing else:
+ *
+ *  - a file whose name contains `connection`, `state` or `machine` → a state machine
+ *    (initial `idle`, final `closed`, a `failed` state, labelled transitions, one of them
+ *    deliberately unconfirmed so the unverified path is exercised);
+ *  - else a file under `server/` or named `http*` / `cli*` → a sequence (three
+ *    participants, one of them a boundary, ordered messages with an async and a return);
+ *  - anything else → `behavior.supported = false` with a reason.
+ *
+ * Every element points at real lines of the chosen file: the line numbers are fixed and
+ * clamped to the file's real length, which is the only thing read from disk here.
+ */
+function behaviorReply(req: GenerateRequest, graph: AgentGraph): AgentGraph {
+  const { index, scope, repoPath } = req;
+  const directlyIn = (file: string) =>
+    scope.paths.some((p) => {
+      const dir = p.replace(/\/+$/, '');
+      if (file === dir) return true;
+      if (dir === '.') return !file.includes('/');
+      return file.startsWith(`${dir}/`) && !file.slice(dir.length + 1).includes('/');
+    });
+  const files = index.codeFiles.filter(directlyIn);
+  const stateFile = files.find((f) => /connection|state|machine/i.test(baseName(f)));
+  const sequenceFile = files.find((f) => f.split('/').includes('server') || /^(http|cli)/i.test(baseName(f)));
+
+  const unsupported = (reason: string): AgentGraph => ({
+    ...graph,
+    diagramKind: 'unsupported',
+    nodes: [],
+    edges: [],
+    behavior: { supported: false, reason },
+  });
+
+  const file = stateFile ?? sequenceFile;
+  if (!file) {
+    return unsupported(
+      `The fake agent derives behaviour only for files named like a state machine or living under server/ (http*, cli*); ` +
+        `${files.length === 0 ? 'the scope has no code files' : `none of ${files.join(', ')} qualifies`}.`,
+    );
+  }
+  const lines = lineCount(repoPath, file);
+  if (lines === 0) return unsupported(`${file} is empty or unreadable.`);
+  const at = (startLine: number, endLine: number, note: string): AgentEvidence => ({
+    file,
+    startLine: Math.min(startLine, lines),
+    endLine: Math.min(endLine, lines),
+    note,
+  });
+  const node = (
+    slug: string,
+    role: string,
+    evidence: AgentEvidence,
+    over: Partial<AgentGraph['nodes'][number]> = {},
+  ): AgentGraph['nodes'][number] => ({
+    slug,
+    kind: role === 'participant' ? 'participant' : 'state',
+    title: slug,
+    summary: `${role} of ${file}, as the fake agent guesses it.`,
+    evidence: [evidence],
+    boundary: false,
+    subsystemId: '',
+    memberOf: [],
+    paths: [],
+    hasDetail: false,
+    role,
+    ...over,
+  });
+  const edge = (
+    from: string,
+    to: string,
+    kind: string,
+    label: string,
+    evidence: AgentEvidence[],
+    over: Partial<AgentGraph['edges'][number]> = {},
+  ): AgentGraph['edges'][number] => ({
+    from,
+    to,
+    kind,
+    label,
+    evidence,
+    confirmed: true,
+    reason: '',
+    order: 0,
+    style: '',
+    group: '',
+    ...over,
+  });
+
+  if (stateFile) {
+    return {
+      ...graph,
+      diagramKind: 'state-machine',
+      behavior: { supported: true, reason: '' },
+      nodes: [
+        node('idle', 'initial', at(8, 9, 'idle state')),
+        node('connecting', 'state', at(10, 13, 'connecting state')),
+        node('open', 'state', at(14, 15, 'open state')),
+        node('failed', 'state', at(16, 17, 'failed state')),
+        node('closed', 'final', at(18, 19, 'closed state')),
+      ],
+      edges: [
+        edge('idle', 'connecting', 'transitions-to', 'connect', [at(9, 9, 'on connect')]),
+        edge('connecting', 'open', 'transitions-to', 'opened', [at(11, 11, 'on opened')]),
+        edge('connecting', 'failed', 'transitions-to', 'error', [at(12, 12, 'on error')]),
+        edge('open', 'closed', 'transitions-to', 'close', [at(15, 15, 'on close')]),
+        edge('failed', 'idle', 'transitions-to', 'retry', [], {
+          confirmed: false,
+          reason: 'the fake agent did not read the retry path',
+        }),
+      ],
+    };
+  }
+
+  return {
+    ...graph,
+    diagramKind: 'sequence',
+    behavior: { supported: true, reason: '' },
+    nodes: [
+      node('caller', 'participant', at(1, 1, 'call site, outside this entity'), { boundary: true, kind: 'caller' }),
+      node('handler', 'participant', at(1, Math.min(lines, 3), 'the entity itself'), { kind: 'module', paths: [file] }),
+      node('collaborator', 'participant', at(1, 1, 'a callee inside the file'), { kind: 'function' }),
+    ],
+    edges: [
+      edge('caller', 'handler', 'calls', 'request', [at(1, 1, 'entry')], { order: 1, style: 'sync' }),
+      edge('handler', 'collaborator', 'calls', 'notify', [at(1, 1, 'fire and forget')], { order: 2, style: 'async' }),
+      edge('handler', 'caller', 'returns', 'result', [at(1, 1, 'return value')], { order: 3, style: 'return' }),
+    ],
+  };
 }

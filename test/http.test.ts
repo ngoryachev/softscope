@@ -1,18 +1,31 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { appendFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createApp } from '../src/server/http/app';
 import { describeToolInput } from '../src/server/agent/claude';
 import { FakeSchemaAgent } from '../src/server/agent/fake';
+import { FakeChangeAgent } from '../src/server/agent/fake-change';
 import { RepoSession } from '../src/server/session';
 import type { ContextResponse, FileResponse, GraphResponse, RepoState } from '../src/shared/api';
 import type { Snapshot } from '../src/shared/graph';
-import { agentGraph, cleanupTemps, commitAll, copyFixtureAsGitRepo, sseEvents, tempCache, waitFor } from './helpers';
+import {
+  agentGraph,
+  cleanupTemps,
+  commitAll,
+  copyFixtureAsGitRepo,
+  l1Graph,
+  sseEvents,
+  tempCache,
+  tempWorkDir,
+  waitFor,
+} from './helpers';
 
 afterAll(cleanupTemps);
 
 const APP_ID = 'L4:root/app';
 const LOGGING_ID = `L3:${APP_ID}/logging`;
+const LOG_ID = `L2:${LOGGING_ID}/log`;
+const LOG_FILE = 'src/util/log.ts';
 
 const l4Reply = agentGraph(
   [
@@ -53,9 +66,43 @@ const l2Reply = agentGraph([
     kind: 'function',
     title: 'log',
     paths: ['src/util/log.ts'],
+    hasDetail: true,
     evidence: [{ file: 'src/util/log.ts', startLine: 1, endLine: 3 }],
   },
 ]);
+
+/** The three L1 outcomes, scripted over the lines of log.ts. */
+const l1StateMachine = l1Graph(
+  'state-machine',
+  [
+    { slug: 'idle', kind: 'state', role: 'initial', evidence: [{ file: LOG_FILE, startLine: 1, endLine: 1 }] },
+    { slug: 'writing', kind: 'state', role: 'state', evidence: [{ file: LOG_FILE, startLine: 2, endLine: 2 }] },
+    { slug: 'done', kind: 'state', role: 'final', evidence: [{ file: LOG_FILE, startLine: 3, endLine: 3 }] },
+  ],
+  [
+    { from: 'idle', to: 'writing', kind: 'transitions-to', label: 'log()', evidence: [{ file: LOG_FILE, startLine: 1, endLine: 1 }] },
+    { from: 'writing', to: 'done', kind: 'transitions-to', label: 'written', evidence: [{ file: LOG_FILE, startLine: 2, endLine: 2 }] },
+  ],
+);
+
+const l1Sequence = l1Graph(
+  'sequence',
+  [
+    { slug: 'caller', kind: 'caller', role: 'participant', boundary: true, evidence: [{ file: LOG_FILE, startLine: 1, endLine: 1 }] },
+    { slug: 'log', kind: 'function', role: 'participant', paths: [LOG_FILE], evidence: [{ file: LOG_FILE, startLine: 1, endLine: 3 }] },
+    { slug: 'stdout', kind: 'stream', role: 'participant', boundary: true, evidence: [{ file: LOG_FILE, startLine: 2, endLine: 2 }] },
+  ],
+  [
+    { from: 'caller', to: 'log', kind: 'calls', label: 'log(message)', order: 1, style: 'sync', evidence: [{ file: LOG_FILE, startLine: 1, endLine: 1 }] },
+    { from: 'log', to: 'stdout', kind: 'writes', label: 'message + newline', order: 2, style: 'async', evidence: [{ file: LOG_FILE, startLine: 2, endLine: 2 }] },
+    { from: 'log', to: 'caller', kind: 'returns', label: 'void', order: 3, style: 'return', evidence: [{ file: LOG_FILE, startLine: 3, endLine: 3 }] },
+  ],
+);
+
+const l1Unsupported = l1Graph('unsupported', [], [], {
+  supported: false,
+  reason: 'log is a single write; there is no state, exchange or branching to show',
+});
 
 let repo: string;
 let agent: FakeSchemaAgent;
@@ -84,11 +131,11 @@ describe('/api/state', () => {
     const state = (await res.json()) as RepoState;
 
     expect(res.status).toBe(200);
-    expect(state.repoPath).toBe(repo);
+    expect(state.repoPath).toBe(realpathSync(repo));
     expect(state.repoName).toBe('sample-app');
     expect(state.isGitRepo).toBe(true);
     expect(state.snapshot?.branch).toBe('main');
-    expect(state.generatableLevels).toEqual(['L4', 'L3', 'L2']);
+    expect(state.generatableLevels).toEqual(['L4', 'L3', 'L2', 'L1']);
     expect(state.fakeAgent).toBe(true);
   });
 
@@ -110,7 +157,49 @@ describe('/api/repo', () => {
 
     expect(res.status).toBe(200);
     expect(((await res.json()) as RepoState).repoName).toBe('sample-app');
-    expect(api.current()?.repoPath).toBe(repo);
+    expect(api.current()?.repoPath).toBe(realpathSync(repo));
+  });
+
+  it('keeps the session, and its open change, when the same repository is posted through a symlink or with ..', async () => {
+    const cache = tempCache();
+    agent = new FakeSchemaAgent({ replies: { 'L4:root': l4Reply, [`L3:${APP_ID}`]: l3Reply }, strict: true });
+    const changeAgent = new FakeChangeAgent();
+    api = createApp({ agent, cache, changeAgent, workDir: tempWorkDir() });
+    const app = api.app;
+    const post = (path: string) =>
+      app.request('/api/repo', { method: 'POST', body: JSON.stringify({ path }), headers: { 'content-type': 'application/json' } });
+
+    expect((await post(repo)).status).toBe(200);
+    const session = api.current()!;
+    await app.request('/api/graph?level=L4&scope=root');
+    await app.request(`/api/graph?level=L3&scope=${encodeURIComponent(APP_ID)}`);
+    const started = await app.request('/api/change', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ nodeIds: [LOGGING_ID], edgeIds: [], task: 'add a prefix' }),
+    });
+    expect(started.status).toBe(200);
+    const { id } = (await started.json()) as { id: string };
+    expect(((await (await app.request('/api/state')).json()) as RepoState).activeChangeId).toBe(id);
+
+    // A symlink next to the repository, and a `..` spelling through it.
+    const link = join(repo, '..', 'repo-link');
+    symlinkSync(repo, link);
+    for (const spelling of [link, join(link, 'src', '..'), `${repo}/src/..`]) {
+      const res = await post(spelling);
+      expect(res.status).toBe(200);
+      const state = (await res.json()) as RepoState;
+      expect(state.repoPath).toBe(realpathSync(repo));
+      expect(state.activeChangeId).toBe(id);
+      expect(api.current()).toBe(session);
+    }
+    expect(agent.calls).toHaveLength(2);
+    // Another directory still switches, and a missing one is still refused with its message.
+    const missing = await post(join(repo, '..', 'nowhere'));
+    expect(missing.status).toBe(400);
+    expect(((await missing.json()) as { error: string }).error).toContain('does not exist');
+    expect(api.current()).toBe(session);
+    await session.changes.discard(id).catch(() => undefined);
   });
 
   it('rejects a missing path and a path that is not a directory', async () => {
@@ -201,9 +290,12 @@ describe('/api/graph', () => {
     expect(res.status).toBe(404);
   });
 
-  it('answers 501 for a level with no prompt builder and 400 for a nonsense level', async () => {
+  it('answers 404 for an L1 scope that no L2 view offers and 400 for a nonsense level', async () => {
     const app = build();
-    expect((await app.request(`/api/graph?level=L1&scope=${encodeURIComponent(LOGGING_ID)}`)).status).toBe(501);
+    // An L3 id is not an L1 scope, and a made-up entity under the logging subsystem is not one either.
+    expect((await app.request(`/api/graph?level=L1&scope=${encodeURIComponent(LOGGING_ID)}`)).status).toBe(404);
+    expect((await app.request(`/api/graph?level=L1&scope=${encodeURIComponent(`L2:${LOGGING_ID}/ghost`)}`)).status).toBe(404);
+    expect(agent.calls.every((c) => c.scope.level !== 'L1')).toBe(true);
     expect((await app.request('/api/graph?level=L9')).status).toBe(400);
   });
 
@@ -225,6 +317,152 @@ describe('/api/graph', () => {
 
 const graphUrl = (level: string, scopeId: string, extra = '') =>
   `/api/graph${extra}?level=${level}&scope=${encodeURIComponent(scopeId)}`;
+
+describe('/api/graph at L1', () => {
+  const openLog = async (app: ReturnType<typeof build>) => {
+    await app.request('/api/graph?level=L4&scope=root');
+    await app.request(`/api/graph?level=L3&scope=${encodeURIComponent(APP_ID)}`);
+    const l2 = (await (await app.request(graphUrl('L2', LOGGING_ID))).json()) as GraphResponse;
+    expect(l2.openable).toEqual([{ level: 'L1', id: LOG_ID, label: 'log', paths: [LOG_FILE] }]);
+  };
+
+  it('returns a state machine with its roles and transition labels', async () => {
+    const app = build();
+    agent.set('L1', LOG_ID, l1StateMachine);
+    await openLog(app);
+
+    const res = await app.request(graphUrl('L1', LOG_ID));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as GraphResponse;
+    expect(body.view.scope).toEqual({ level: 'L1', id: LOG_ID, label: 'log', paths: [LOG_FILE] });
+    expect(body.view.diagramKind).toBe('state-machine');
+    expect(body.view.behavior).toEqual({ supported: true, reason: '' });
+    expect(body.view.nodes.map((n) => [n.title, n.role])).toEqual([
+      ['idle', 'initial'],
+      ['writing', 'state'],
+      ['done', 'final'],
+    ]);
+    expect(body.view.edges.map((e) => e.label)).toEqual(['log()', 'written']);
+    expect(body.openable).toEqual([]);
+    expect(body.cached).toBe(false);
+    expect(((await (await app.request(graphUrl('L1', LOG_ID))).json()) as GraphResponse).cached).toBe(true);
+    expect(agent.callsFor('L1', LOG_ID)).toBe(1);
+  });
+
+  it('returns a sequence with ordered, styled messages and a boundary participant', async () => {
+    const app = build();
+    agent.set('L1', LOG_ID, l1Sequence);
+    await openLog(app);
+
+    const body = (await (await app.request(graphUrl('L1', LOG_ID))).json()) as GraphResponse;
+    expect(body.view.diagramKind).toBe('sequence');
+    expect(body.view.nodes.map((n) => [n.title, n.role, n.boundary])).toEqual([
+      ['caller', 'participant', true],
+      ['log', 'participant', false],
+      ['stdout', 'participant', true],
+    ]);
+    expect(body.view.edges.map((e) => [e.order, e.style, e.status])).toEqual([
+      [1, 'sync', 'confirmed'],
+      [2, 'async', 'confirmed'],
+      [3, 'return', 'confirmed'],
+    ]);
+    expect(body.view.edges[0]!.id).toBe(`L1:${LOG_ID}|L1:${LOG_ID}/caller->L1:${LOG_ID}/log|calls#1`);
+    expect(body.issues).toEqual([]);
+  });
+
+  it('returns an unsupported behaviour view with the reason and no nodes, and caches it', async () => {
+    const app = build();
+    agent.set('L1', LOG_ID, l1Unsupported);
+    await openLog(app);
+
+    const body = (await (await app.request(graphUrl('L1', LOG_ID))).json()) as GraphResponse;
+    expect(body.view.diagramKind).toBe('unsupported');
+    expect(body.view.nodes).toEqual([]);
+    expect(body.view.edges).toEqual([]);
+    expect(body.view.behavior).toEqual({ supported: false, reason: l1Unsupported.behavior.reason });
+    expect(body.issues).toEqual([]);
+
+    const again = (await (await app.request(graphUrl('L1', LOG_ID))).json()) as GraphResponse;
+    expect(again.cached).toBe(true);
+    expect(again.view.behavior.supported).toBe(false);
+    expect(agent.callsFor('L1', LOG_ID)).toBe(1);
+    // Regenerate asks the agent again.
+    await app.request(graphUrl('L1', LOG_ID, '') + '&refresh=1');
+    expect(agent.callsFor('L1', LOG_ID)).toBe(2);
+  });
+
+  it('streams progress for an L1 generation and cancels it like any other level', async () => {
+    const app = build(true, true);
+    agent.set('L1', LOG_ID, l1StateMachine);
+    agent.setProgress('L1', LOG_ID, [{ tool: 'Read', detail: LOG_FILE }]);
+    await openLog(app);
+
+    const pending = app.request(graphUrl('L1', LOG_ID));
+    await waitFor(() => agent.callsFor('L1', LOG_ID) === 1);
+    const stream = await app.request(graphUrl('L1', LOG_ID, '/progress'));
+    const events = sseEvents(await stream.text());
+    expect(events.map((e) => e.type)).toEqual(['started', 'activity', 'done']);
+    expect(events[0]).toMatchObject({ level: 'L1', scopeId: LOG_ID });
+    expect((await pending).status).toBe(200);
+
+    const second = app.request(graphUrl('L1', LOG_ID) + '&refresh=1');
+    await waitFor(() => agent.callsFor('L1', LOG_ID) === 2);
+    const cancel = await app.request('/api/graph/cancel', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ level: 'L1', scopeId: LOG_ID }),
+    });
+    expect(await cancel.json()).toEqual({ cancelled: true });
+    expect((await second).status).toBe(499);
+    expect(sseEvents(await (await app.request(graphUrl('L1', LOG_ID, '/progress'))).text())).toEqual([
+      { type: 'idle', level: 'L1', scopeId: LOG_ID },
+    ]);
+  });
+
+  it('builds the context of L1 participants and messages, listing the messages in execution order', async () => {
+    const app = build();
+    agent.set('L1', LOG_ID, l1Sequence);
+    await openLog(app);
+    await app.request(graphUrl('L1', LOG_ID));
+    const logParticipant = `L1:${LOG_ID}/log`;
+    const message = (from: string, to: string, kind: string, order: number) =>
+      `L1:${LOG_ID}|L1:${LOG_ID}/${from}->L1:${LOG_ID}/${to}|${kind}#${order}`;
+
+    const res = await app.request('/api/context', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      // The return first, the call last: the order of the ids must not matter.
+      body: JSON.stringify({ nodeIds: [logParticipant], edgeIds: [message('log', 'caller', 'returns', 3), message('caller', 'log', 'calls', 1)], task: 'add a timestamp' }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ContextResponse;
+    expect(body.nodes.map((n) => [n.id, n.level, n.boundary])).toEqual([
+      [`L1:${LOG_ID}/caller`, 'L1', true],
+      [logParticipant, 'L1', false],
+    ]);
+    expect(body.relations.internal.map((r) => [r.order, r.style, r.label])).toEqual([
+      [1, 'sync', 'log(message)'],
+      [3, 'return', 'void'],
+    ]);
+    expect(body.relations.external.map((r) => [r.order, r.style])).toEqual([[2, 'async']]);
+    expect(body.limits.paths).toEqual([LOG_FILE]);
+    expect(body.snapshots[0]!.scopes.map((s) => s.level)).toEqual(['L1']);
+
+    const markdown = await (
+      await app.request('/api/context?format=markdown', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ nodeIds: [logParticipant], edgeIds: [message('log', 'caller', 'returns', 3), message('caller', 'log', 'calls', 1)] }),
+      })
+    ).text();
+    expect(markdown).toContain('- #1 caller → log (calls, log(message), sync) — confirmed');
+    expect(markdown).toContain('- #2 log → stdout (writes, message + newline, async) — confirmed');
+    expect(markdown).toContain('- #3 log → caller (returns, void, return) — confirmed');
+    expect(markdown.indexOf('#1 caller')).toBeLessThan(markdown.indexOf('#3 log'));
+    expect(markdown).toContain('**log** (L1, function)');
+    expect(agent.calls).toHaveLength(4);
+  });
+});
 
 describe('/api/graph/progress and /api/graph/cancel', () => {
   it('streams the started, activity and done events of a running generation', async () => {

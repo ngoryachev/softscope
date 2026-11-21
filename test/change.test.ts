@@ -27,6 +27,7 @@ import {
   copyFixture,
   copyFixtureAsGitRepo,
   gitOut,
+  l1Graph,
   sseEvents,
   tempCache,
   tempWorkDir,
@@ -208,6 +209,45 @@ describe('POST /api/change — isolation and verification', () => {
       [LOGGING_ID, 'L3', APP_ID, [LOG_FILE]],
     ]);
     expect(done.affectedViews.map((s) => `${s.level}:${s.id}`)).toEqual(['L4:root', `L3:${APP_ID}`]);
+  });
+
+  it('lists the L1 behaviour view of an entity whose file the change touched among the affected views', async () => {
+    const app = build();
+    const LOG_ID = `L2:${LOGGING_ID}/log`;
+    schemaAgent.set(
+      'L2',
+      LOGGING_ID,
+      agentGraph([{ slug: 'log', kind: 'function', title: 'log', paths: [LOG_FILE], hasDetail: true, evidence: [{ file: LOG_FILE, startLine: 1, endLine: 3 }] }]),
+    );
+    schemaAgent.set(
+      'L1',
+      LOG_ID,
+      l1Graph(
+        'state-machine',
+        [
+          { slug: 'idle', role: 'initial', evidence: [{ file: LOG_FILE, startLine: 1, endLine: 1 }] },
+          { slug: 'written', role: 'final', evidence: [{ file: LOG_FILE, startLine: 2, endLine: 2 }] },
+        ],
+        [{ from: 'idle', to: 'written', kind: 'transitions-to', label: 'log()', evidence: [{ file: LOG_FILE, startLine: 2, endLine: 2 }] }],
+      ),
+    );
+    await loadViews(app);
+    expect((await app.request(`/api/graph?level=L2&scope=${encodeURIComponent(LOGGING_ID)}`)).status).toBe(200);
+    const l1 = await app.request(`/api/graph?level=L1&scope=${encodeURIComponent(LOG_ID)}`);
+    expect(l1.status).toBe(200);
+
+    const done = await settled(app, await startChange(app));
+
+    expect(done.status).toBe('done');
+    expect(done.affectedViews.map((s) => `${s.level}:${s.id}`)).toEqual(['L4:root', `L3:${APP_ID}`, `L2:${LOGGING_ID}`, `L1:${LOG_ID}`]);
+    // Both states point at the edited file, so both are listed for the L1 view.
+    expect(done.affected.filter((a) => a.level === 'L1').map((a) => [a.nodeId, a.files])).toEqual([
+      [`L1:${LOG_ID}/idle`, [LOG_FILE]],
+      [`L1:${LOG_ID}/written`, [LOG_FILE]],
+    ]);
+    const applied = await post(app, `/api/change/${done.id}/apply`, {});
+    expect(applied.status).toBe(200);
+    expect(((await applied.json()) as ApplyResponse).affectedViews.map((s) => s.level)).toEqual(['L4', 'L3', 'L2', 'L1']);
   });
 
   it('builds the change on top of the uncommitted changes and untracked files of the user tree', async () => {

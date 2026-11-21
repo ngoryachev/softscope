@@ -100,14 +100,16 @@ function groupItems(items: BasketItem[]): Group[] {
   return groups.sort((a, b) => order(a.level) - order(b.level) || a.scopeLabel.localeCompare(b.scopeLabel));
 }
 
+/** Relations arrive from `buildSelectionContext` already in reading order: a sequence's messages by `#order`. */
 function RelationList({ relations }: { relations: ContextRelation[] }) {
   if (relations.length === 0) return <p className="sz-muted">None.</p>;
   return (
     <ul className="sz-relations">
       {relations.map((r) => (
         <li key={r.id}>
+          {r.order !== undefined ? <span className="sz-muted">#{r.order} </span> : null}
           {r.from.title} → {r.to.title}
-          <span className="sz-muted"> ({[r.kind, r.label].filter(Boolean).join(', ')})</span>{' '}
+          <span className="sz-muted"> ({[r.kind, r.label, r.style].filter(Boolean).join(', ')})</span>{' '}
           {r.status === 'unverified' ? (
             <span className="sz-badge sz-badge-warn" title={r.reason}>
               unverified

@@ -11,7 +11,13 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import type { Level } from '../../shared/graph';
 
-/** Bump when the cached payload shape, the on-disk layout or the contract changes. */
+/**
+ * Bump when the cached payload shape, the on-disk layout or the contract changes in a way
+ * an older entry cannot survive. Not bumped for L1 (behaviour views): the payload is still
+ * the agent's raw reply, every field the contract gained (`role`, `order`, `style`,
+ * `group`, `behavior`) has a zod default, and validation runs on every read — so an entry
+ * written before them parses and validates exactly as it did.
+ */
 export const CACHE_VERSION = 2;
 
 export interface CacheKey {
