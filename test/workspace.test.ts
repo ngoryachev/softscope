@@ -102,6 +102,19 @@ describe('createWorkspace', () => {
     gitOut(repo, ['worktree', 'remove', '--force', own]);
   });
 
+  it('drops the owner file of a draft whose directory was deleted by hand', () => {
+    const repo = copyFixtureAsGitRepo();
+    const workDir = tempWorkDir();
+    const { dir } = createWorkspace({ repoPath: repo, id: 'gone', workDir });
+    writeFileSync(ownerFile(dir), `${spawnSync(process.execPath, ['-e', '']).pid}\n`);
+    rmSync(dir, { recursive: true, force: true });
+    expect(existsSync(ownerFile(dir))).toBe(true);
+
+    expect(pruneLeftoverWorkspaces(repo, workDir)).toEqual([]);
+    expect(existsSync(ownerFile(dir))).toBe(false);
+    expect(gitOut(repo, ['worktree', 'list']).trim().split('\n')).toHaveLength(1);
+  });
+
   it('skips an untracked nested repository instead of failing on it', () => {
     const repo = copyFixtureAsGitRepo();
     mkdirSync(join(repo, 'vendor-clone'));

@@ -327,6 +327,11 @@ export function pruneLeftoverWorkspaces(repoPath: string, workDir: string, keep:
     const owner = workspaceOwner(dir);
     if (owner === null) continue; // not created by SoftZoom
     if (isProcessAlive(owner)) continue; // another live instance's draft
+    if (!existsSync(dir)) {
+      // Removed by hand: the owner file is all that is left of it.
+      rmSync(ownerFile(dir), { force: true });
+      continue;
+    }
     if (!isLinkedWorktreeDir(dir)) continue;
     removeWorkspace(repoPath, dir);
     removed.push(dir);
