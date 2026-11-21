@@ -155,6 +155,26 @@ describe('edges', () => {
     expect(view.edges[0]!.evidence).toHaveLength(1);
   });
 
+  it('merges a relation the agent cited twice instead of dropping the second mention', () => {
+    const { view } = run(
+      agentGraph(
+        [
+          { slug: 'a', evidence: [{ file: 'src/index.ts', startLine: 1, endLine: 1 }] },
+          { slug: 'b', evidence: [{ file: 'src/util/log.ts', startLine: 1, endLine: 1 }] },
+        ],
+        [
+          { from: 'a', to: 'b', kind: 'calls', confirmed: false, reason: 'only a guess', evidence: [] },
+          { from: 'a', to: 'b', kind: 'calls', evidence: [{ file: 'src/index.ts', startLine: 4, endLine: 4 }] },
+        ],
+      ),
+    );
+
+    expect(view.edges).toHaveLength(1);
+    // The evidence of both mentions is kept, and the confirmed one wins the status.
+    expect(view.edges[0]).toMatchObject({ status: 'confirmed', reason: '' });
+    expect(view.edges[0]!.evidence).toEqual([{ file: 'src/index.ts', startLine: 4, endLine: 4 }]);
+  });
+
   it('marks a fully evidenced edge confirmed', () => {
     const { view } = run(
       agentGraph(

@@ -70,10 +70,11 @@ export function indexDerivedReply(req: GenerateRequest): AgentGraph {
     scope.paths.includes('.') || scope.paths.some((p) => file === p || file.startsWith(`${p.replace(/\/+$/, '')}/`));
 
   if (scope.level === 'L4') {
-    const all = index.packages.packages;
-    // The root package is shown only when it is the whole repository; otherwise the
-    // workspace packages are the applications.
-    const packages = all.filter((p) => all.length === 1 || p.dir !== '.');
+    // The workspace packages are the applications; the root package is one too unless
+    // workspaces took over. A nested package.json that is not a workspace member (a
+    // fixture, a vendored copy) is neither.
+    const workspaces = index.packages.packages.filter((p) => p.workspace);
+    const packages = workspaces.length > 0 ? workspaces : index.packages.packages.filter((p) => p.dir === '.');
     for (const pkg of packages) {
       const manifest = pkg.dir === '.' ? 'package.json' : `${pkg.dir}/package.json`;
       graph.nodes.push({

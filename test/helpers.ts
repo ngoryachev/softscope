@@ -47,6 +47,11 @@ export function copyFixtureAsGitRepo(): string {
   return dir;
 }
 
+/** A new branch at the same commit: the code is unchanged, only the label moves. */
+export function switchToNewBranch(dir: string, name: string): void {
+  git(dir, ['checkout', '--quiet', '-b', name]);
+}
+
 export function commitAll(dir: string, message: string): void {
   git(dir, ['add', '-A', '-f']);
   git(dir, ['commit', '--quiet', '-m', message]);

@@ -6,7 +6,7 @@
  * commit must not reach the agent.
  */
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import type { Level } from '../../shared/graph';
@@ -84,6 +84,49 @@ export class FileCache {
       return null;
     }
     return envelope.value;
+  }
+
+  /**
+   * The newest entry for this scope at any repository state, ignoring `stateId`.
+   *
+   * This is what lets the server keep showing the previous schema, marked stale, after
+   * the working tree moves, instead of spending a minute of agent time on every edit
+   * (SPEC §9.1: invalidate the affected parts, §9.4: never present a stale schema as
+   * current).
+   */
+  latest<T>(key: Omit<CacheKey, 'stateId'>): { value: T; stateId: string; storedAt: string } | null {
+    const dir = join(this.root, `v${CACHE_VERSION}`, short(resolve(key.repoPath), 12));
+    let states: string[];
+    try {
+      states = readdirSync(dir);
+    } catch {
+      return null;
+    }
+    const file = `${key.level}-${slug(key.scopeId)}.json`;
+    let best: { value: T; stateId: string; storedAt: string } | null = null;
+    for (const state of states) {
+      let envelope: CacheEnvelope<T>;
+      try {
+        envelope = JSON.parse(readFileSync(join(dir, state, file), 'utf8')) as CacheEnvelope<T>;
+      } catch {
+        continue;
+      }
+      const k = envelope.key;
+      if (
+        envelope.version !== CACHE_VERSION ||
+        !k ||
+        resolve(k.repoPath) !== resolve(key.repoPath) ||
+        k.level !== key.level ||
+        k.scopeId !== key.scopeId
+      ) {
+        continue;
+      }
+      // storedAt is an ISO timestamp, so a string comparison orders it correctly.
+      if (!best || envelope.storedAt > best.storedAt) {
+        best = { value: envelope.value, stateId: k.stateId, storedAt: envelope.storedAt };
+      }
+    }
+    return best;
   }
 
   set<T>(key: CacheKey, value: T): string {

@@ -22,7 +22,10 @@ This is step 1 of 5 of the product cycle — **Explore** (SPEC §6.1):
 - Every schema is pinned to a branch, a commit and the state of the working tree, and is
   marked **stale** as soon as the repository moves (SPEC §9.4).
 - Agent results are cached on disk per (repository state, level, scope): re-opening the
-  same area at the same commit does not call the agent again (SPEC §9.1).
+  same area at the same commit does not call the agent again (SPEC §9.1). Once you edit
+  something, the last schema of that area keeps being shown, flagged stale — a working
+  tree changes on every save, and you decide when a fresh analysis is worth the wait and
+  the tokens by pressing **Regenerate**.
 
 Not built yet: Zoom to L2/L1, selection-driven prompting, AI changes and verification.
 The graph model, the agent interface and the cache are shaped for them — a new level is
@@ -45,10 +48,10 @@ not draw is not proof that none exists (SPEC §R5).
 - `git` on `PATH` (optional — a directory without git works, but the snapshot and the
   cache key then fall back to a file-list fingerprint).
 
-Analysis is **read-only**: the agent session is restricted to `Read`, `Grep` and `Glob`,
-write and shell tools are denied, and the analyzed repository's own `CLAUDE.md`,
-settings and MCP servers are not loaded into the session so they cannot steer the
-analysis.
+Analysis is **read-only**: the agent session is given `Read`, `Grep` and `Glob` as its
+only tools, so no write or shell tool is offered to the model at all, and the analyzed
+repository's own `CLAUDE.md`, settings and MCP servers are not loaded into the session
+so they cannot steer the analysis.
 
 ## Running it
 

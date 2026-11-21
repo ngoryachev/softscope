@@ -73,6 +73,34 @@ describe('cache hit and miss', () => {
   });
 });
 
+describe('latest entry for a scope', () => {
+  it('finds the newest generation of the scope across repository states', async () => {
+    const cache = tempCache();
+    const key = baseKey('/tmp/repo-a');
+    cache.set({ ...key, stateId: 'older' }, { marker: 'older' });
+    // storedAt has millisecond resolution, so the writes have to be distinguishable.
+    await new Promise((r) => setTimeout(r, 5));
+    cache.set({ ...key, stateId: 'newer' }, { marker: 'newer' });
+
+    const latest = cache.latest<{ marker: string }>({ repoPath: key.repoPath, level: 'L4', scopeId: 'root' });
+    expect(latest?.value).toEqual({ marker: 'newer' });
+    expect(latest?.stateId).toBe('newer');
+  });
+
+  it('ignores other scopes, other levels, other repositories and an empty cache', () => {
+    const cache = tempCache();
+    const key = baseKey('/tmp/repo-a');
+    cache.set({ ...key, stateId: 's1', level: 'L3', scopeId: 'L4:root/app' }, { marker: 'l3' });
+
+    expect(cache.latest({ repoPath: key.repoPath, level: 'L4', scopeId: 'root' })).toBeNull();
+    expect(cache.latest({ repoPath: '/tmp/repo-b', level: 'L3', scopeId: 'L4:root/app' })).toBeNull();
+    expect(cache.latest({ repoPath: key.repoPath, level: 'L3', scopeId: 'L4:root/other' })).toBeNull();
+    expect(cache.latest<{ marker: string }>({ repoPath: key.repoPath, level: 'L3', scopeId: 'L4:root/app' })?.value).toEqual({
+      marker: 'l3',
+    });
+  });
+});
+
 describe('cache location', () => {
   it('writes under the configured root and never inside the analyzed repository', () => {
     const repo = copyFixture();

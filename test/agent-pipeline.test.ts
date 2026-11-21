@@ -10,7 +10,15 @@ import { FakeSchemaAgent, indexDerivedReply } from '../src/server/agent/fake';
 import { summarizeForAgent } from '../src/server/indexer/index';
 import { LevelNotSupportedError, RepoSession, ScopeNotFoundError } from '../src/server/session';
 import type { FileCache } from '../src/server/cache/file-cache';
-import { agentGraph, cleanupTemps, commitAll, copyFixture, copyFixtureAsGitRepo, tempCache } from './helpers';
+import {
+  agentGraph,
+  cleanupTemps,
+  commitAll,
+  copyFixture,
+  copyFixtureAsGitRepo,
+  switchToNewBranch,
+  tempCache,
+} from './helpers';
 
 afterAll(cleanupTemps);
 
@@ -224,30 +232,55 @@ describe('lazy L3', () => {
 });
 
 describe('snapshot changes', () => {
-  it('regenerates after a commit and keeps the entry of the previous commit', async () => {
+  it('shows the previous schema marked stale after a commit, and regenerates on request', async () => {
     const first = await session.graph({ level: 'L4', scopeId: 'root' });
     appendFileSync(join(repo, 'packages/core/src/math.ts'), '\nexport const two = 2;\n');
     commitAll(repo, 'second');
 
+    // Navigating back to the scope must not spend a minute of agent time: the schema of
+    // the previous commit is shown, flagged stale rather than presented as current.
     const afterCommit = await newSession().graph({ level: 'L4', scopeId: 'root' });
 
-    expect(afterCommit.view.snapshot.commit).not.toBe(first.view.snapshot.commit);
-    expect(afterCommit.cached).toBe(false);
-    expect(agent.calls).toHaveLength(2);
+    expect(afterCommit.cached).toBe(true);
+    expect(afterCommit.stale).toBe(true);
+    expect(afterCommit.view.snapshot.commit).toBe(first.view.snapshot.commit);
+    expect(agent.calls).toHaveLength(1);
 
-    // Still cached for the commit it was generated at.
-    expect(cache.get({ repoPath: repo, stateId: first.view.snapshot.stateId, level: 'L4', scopeId: 'root' })).not.toBeNull();
+    // Regenerate pins the schema to the new commit; the old entry stays cached.
+    const fresh = await session.graph({ level: 'L4', scopeId: 'root', refresh: true });
+    expect(fresh.stale).toBe(false);
+    expect(fresh.view.snapshot.commit).not.toBe(first.view.snapshot.commit);
+    expect(agent.calls).toHaveLength(2);
+    expect(
+      cache.get({ repoPath: repo, stateId: first.view.snapshot.stateId, level: 'L4', scopeId: 'root' }),
+    ).not.toBeNull();
   });
 
-  it('regenerates after an uncommitted edit', async () => {
-    await session.graph({ level: 'L4', scopeId: 'root' });
+  it('shows the previous schema marked stale after an uncommitted edit', async () => {
+    const first = await session.graph({ level: 'L4', scopeId: 'root' });
     appendFileSync(join(repo, 'packages/core/src/math.ts'), '\nexport const three = 3;\n');
 
     const dirty = await newSession().graph({ level: 'L4', scopeId: 'root' });
 
-    expect(dirty.view.snapshot.dirty).toBe(true);
-    expect(dirty.cached).toBe(false);
-    expect(agent.calls).toHaveLength(2);
+    expect(dirty.cached).toBe(true);
+    expect(dirty.stale).toBe(true);
+    expect(dirty.view.snapshot.stateId).toBe(first.view.snapshot.stateId);
+    expect(agent.calls).toHaveLength(1);
+  });
+
+  it('reuses the schema of the same commit when only the branch label changed', async () => {
+    const first = await session.graph({ level: 'L4', scopeId: 'root' });
+    switchToNewBranch(repo, 'feature');
+
+    const onFeature = await newSession().graph({ level: 'L4', scopeId: 'root' });
+
+    // Same commit, same working tree: the code is identical, so this is not stale —
+    // only the branch the snapshot reports changes.
+    expect(onFeature.cached).toBe(true);
+    expect(onFeature.stale).toBe(false);
+    expect(onFeature.view.snapshot.branch).toBe('feature');
+    expect(first.view.snapshot.branch).toBe('main');
+    expect(agent.calls).toHaveLength(1);
   });
 
   it('re-validates a cached reply against the files that are on disk now', async () => {
@@ -289,15 +322,18 @@ describe('a directory without git', () => {
     return { dir, plainAgent, plainSession: new RepoSession(dir, { agent: plainAgent, cache: tempCache() }) };
   };
 
-  it('invalidates the cached schema after a file is edited', async () => {
+  it('notices an edit and stops presenting the cached schema as current', async () => {
     const { dir, plainAgent, plainSession: s } = plainSession();
     const first = await s.graph({ level: 'L4', scopeId: 'root' });
 
     appendFileSync(join(dir, 'src/index.ts'), '\nexport const edited = 1;\n');
+
+    expect(s.liveSnapshot().stateId).not.toBe(first.view.snapshot.stateId);
     const second = await s.graph({ level: 'L4', scopeId: 'root' });
 
-    expect(second.view.snapshot.stateId).not.toBe(first.view.snapshot.stateId);
-    expect(second.cached).toBe(false);
+    expect(second.stale).toBe(true);
+    expect(plainAgent.calls).toHaveLength(1);
+    expect((await s.graph({ level: 'L4', scopeId: 'root', refresh: true })).stale).toBe(false);
     expect(plainAgent.calls).toHaveLength(2);
   });
 
@@ -308,7 +344,7 @@ describe('a directory without git', () => {
     expect(s.index()).toBe(s.index());
   });
 
-  it('invalidates the cached schema after a file is added', async () => {
+  it('notices a file that was added after the first index', async () => {
     const { dir, plainAgent, plainSession: s } = plainSession();
     const first = await s.graph({ level: 'L4', scopeId: 'root' });
 
@@ -320,8 +356,12 @@ describe('a directory without git', () => {
     expect(s.index().files).toContain('src/added.ts');
 
     const second = await s.graph({ level: 'L4', scopeId: 'root' });
-    expect(second.cached).toBe(false);
+    expect(second.stale).toBe(true);
+
+    // Regenerating sees the new file, which is what the stale index used to hide.
+    await s.graph({ level: 'L4', scopeId: 'root', refresh: true });
     expect(plainAgent.calls).toHaveLength(2);
+    expect(plainAgent.calls.at(-1)!.index.files).toContain('src/added.ts');
   });
 });
 

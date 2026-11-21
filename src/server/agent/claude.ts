@@ -15,8 +15,13 @@ import { agentGraphJsonSchema, parseAgentGraph, type AgentGraph } from '../../sh
 import { buildPrompt } from './prompts';
 import { AgentError, type GenerateRequest, type SchemaAgent } from './types';
 
+/**
+ * The only tools the analysis session has. Passed as `tools`, which sets the base set of
+ * built-in tools, so nothing else is offered to the model in the first place — rather
+ * than offered and denied at call time — and as `allowedTools`, so these three need no
+ * permission prompt under `dontAsk`.
+ */
 const READ_ONLY_TOOLS = ['Read', 'Grep', 'Glob'];
-const WRITE_TOOLS = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'WebFetch', 'WebSearch', 'Task'];
 
 export interface ClaudeSchemaAgentOptions {
   model?: string;
@@ -50,8 +55,8 @@ export class ClaudeSchemaAgent implements SchemaAgent {
     const options: Options = {
       cwd: req.repoPath,
       permissionMode: 'dontAsk',
+      tools: READ_ONLY_TOOLS,
       allowedTools: READ_ONLY_TOOLS,
-      disallowedTools: WRITE_TOOLS,
       settingSources: [],
       systemPrompt: { type: 'preset', preset: 'claude_code', append: system },
       outputFormat: { type: 'json_schema', schema: agentGraphJsonSchema },

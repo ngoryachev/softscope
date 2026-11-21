@@ -135,8 +135,7 @@ export class RepoSession {
       scopeId: scope.id,
     };
 
-    let cached = req.refresh ? null : this.deps.cache.get<CachedGeneration>(cacheKey);
-    if (cached && !sameState(cached.snapshot, index.snapshot)) cached = null;
+    const cached = req.refresh ? null : this.reusable(cacheKey, index.snapshot);
 
     const generation =
       cached ??
@@ -151,7 +150,9 @@ export class RepoSession {
         });
         const fresh: CachedGeneration = {
           scope,
-          snapshot: index.snapshot,
+          // The agent's own finish time, not the moment the index was built: an L3
+          // generated minutes after the L4 of the same state is not that old.
+          snapshot: { ...index.snapshot, generatedAt: new Date().toISOString() },
           agent: this.deps.agent.name,
           raw,
         };
@@ -176,6 +177,28 @@ export class RepoSession {
       issues,
       openable: this.openableFrom(view),
     };
+  }
+
+  /**
+   * A generation that may be shown for this scope without calling the agent:
+   *
+   *  - the entry for the live state, which is current;
+   *  - failing that, the newest earlier entry for the same scope, which is shown marked
+   *    stale (SPEC §9.4). A working tree is dirty almost all the time and changes on
+   *    every save, so regenerating on each navigation would make exploring a repository
+   *    a sequence of minute-long, paid agent calls. The user decides when to pay for a
+   *    fresh schema, through Regenerate (`refresh`).
+   */
+  private reusable(key: CacheKey, live: Snapshot): CachedGeneration | null {
+    const exact = this.deps.cache.get<CachedGeneration>(key);
+    if (exact) {
+      // The key pins the commit and the working tree, so the code behind this entry is
+      // the code on disk; only the branch label can differ, when a branch was created
+      // or renamed at the same commit. Relabel it rather than regenerate.
+      if (sameState(exact.snapshot, live)) return exact;
+      return { ...exact, snapshot: { ...exact.snapshot, branch: live.branch } };
+    }
+    return this.deps.cache.latest<CachedGeneration>(key)?.value ?? null;
   }
 
   /**

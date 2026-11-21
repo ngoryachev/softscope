@@ -209,7 +209,7 @@ export function validateView({ repoPath, scope, snapshot, raw }: ValidateOptions
   }
 
   const edges: GraphEdge[] = [];
-  const seenEdges = new Set<string>();
+  const byId = new Map<string, GraphEdge>();
   for (const edge of raw.edges) {
     const from = idBySlug.get(edge.from);
     const to = idBySlug.get(edge.to);
@@ -221,24 +221,49 @@ export function validateView({ repoPath, scope, snapshot, raw }: ValidateOptions
       continue;
     }
     const id = edgeId(scope, from, to, edge.kind);
-    if (seenEdges.has(id)) continue;
-    seenEdges.add(id);
     const evidence = checkEvidence(facts, edge.evidence, { edgeId: id }, issues);
     const confirmed = edge.confirmed && evidence.length > 0;
-    if (!confirmed) {
-      const why = edge.confirmed
+    const why = confirmed
+      ? ''
+      : edge.confirmed
         ? 'no evidence survived validation against the current code'
         : edge.reason || 'the agent could not confirm this relation';
+    if (!confirmed) {
       issues.push({
         kind: 'edge-unverified',
         message: `Edge ${edge.kind} ${from} -> ${to} is unverified: ${why}.`,
         edgeId: id,
       });
-      edges.push({ id, from, to, kind: edge.kind, label: edge.label, evidence, status: 'unverified', reason: why });
+    }
+    const existing = byId.get(id);
+    if (!existing) {
+      byId.set(id, {
+        id,
+        from,
+        to,
+        kind: edge.kind,
+        label: edge.label,
+        evidence,
+        status: confirmed ? 'confirmed' : 'unverified',
+        reason: why,
+      });
       continue;
     }
-    edges.push({ id, from, to, kind: edge.kind, label: edge.label, evidence, status: 'confirmed', reason: '' });
+    // The agent cited the same relation twice. Keep both pieces of evidence rather than
+    // dropping the second: the selection context is built from exactly this list.
+    for (const ev of evidence) {
+      const seen = existing.evidence.some(
+        (e) => e.file === ev.file && e.startLine === ev.startLine && e.endLine === ev.endLine,
+      );
+      if (!seen) existing.evidence.push(ev);
+    }
+    if (confirmed && existing.status === 'unverified') {
+      existing.status = 'confirmed';
+      existing.reason = '';
+    }
+    if (edge.label && !existing.label) existing.label = edge.label;
   }
+  edges.push(...byId.values());
 
   return {
     view: {
