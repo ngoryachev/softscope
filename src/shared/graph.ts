@@ -7,7 +7,10 @@
  *    in several subsystems (SPEC §5.1);
  *  - boundary nodes are ordinary nodes with `boundary: true` (SPEC §4.4);
  *  - every node and edge carries `evidence`, and an edge that could not be confirmed
- *    stays in the graph as `unverified` rather than disappearing (SPEC §5.4).
+ *    stays in the graph as `unverified` rather than disappearing (SPEC §5.4);
+ *  - L1 (behaviour) is an ordinary `GraphView` whose `diagramKind` is one of
+ *    `BEHAVIOR_KINDS`, with `role` on the nodes and `order`/`style`/`group` on the edges
+ *    carrying what a state machine, a sequence or a flow needs beyond a plain graph.
  */
 
 /** Semantic zoom levels of SPEC §5.1, from applications down to behaviour. */
@@ -30,6 +33,41 @@ export function levelTitle(level: Level): string {
 export function nextLevel(level: Level): Level | null {
   const i = LEVELS.indexOf(level);
   return i < 0 || i === LEVELS.length - 1 ? null : LEVELS[i + 1]!;
+}
+
+/* ------------------------------------------------------------------------------------ */
+/* Behaviour views (L1, SPEC §5.3, FR-13)                                               */
+/* ------------------------------------------------------------------------------------ */
+
+/** The diagram kinds an L1 view may have; `unsupported` carries no nodes, only a reason. */
+export type BehaviorKind = 'state-machine' | 'sequence' | 'flow' | 'unsupported';
+
+export const BEHAVIOR_KINDS: readonly BehaviorKind[] = ['state-machine', 'sequence', 'flow', 'unsupported'] as const;
+
+export function isBehaviorKind(kind: string): kind is BehaviorKind {
+  return (BEHAVIOR_KINDS as readonly string[]).includes(kind);
+}
+
+/** What a node is inside a behaviour diagram; absent on L4–L2 nodes. */
+export type NodeRole = 'initial' | 'final' | 'state' | 'participant' | 'start' | 'end' | 'step' | 'decision';
+
+/** The roles each behaviour kind allows; any other value is cleared by validation. */
+export const NODE_ROLES_BY_KIND: Record<Exclude<BehaviorKind, 'unsupported'>, readonly NodeRole[]> = {
+  'state-machine': ['initial', 'final', 'state'],
+  sequence: ['participant'],
+  flow: ['start', 'end', 'step', 'decision'],
+};
+
+/** How a sequence message is drawn: solid with a filled head, open head, dashed return. */
+export type MessageStyle = 'sync' | 'async' | 'return';
+
+export const MESSAGE_STYLES: readonly MessageStyle[] = ['sync', 'async', 'return'] as const;
+
+/** Whether the agent could describe the entity's behaviour at all (R1/R5). */
+export interface BehaviorInfo {
+  supported: boolean;
+  /** Why no behaviour view could be built. Empty when `supported`. */
+  reason: string;
 }
 
 /**
@@ -70,6 +108,11 @@ export interface GraphNode {
   paths: string[];
   /** Set when the node can be opened one level deeper. */
   childScope: ScopeRef | null;
+  /**
+   * L1 only: what the node is inside the behaviour diagram — an initial or final state,
+   * a participant of a sequence, a decision of a flow. Absent on L4–L2 nodes.
+   */
+  role?: NodeRole;
 }
 
 export type EdgeStatus = 'confirmed' | 'unverified';
@@ -89,6 +132,12 @@ export interface GraphEdge {
   status: EdgeStatus;
   /** Why the edge is unverified. Empty for confirmed edges. */
   reason: string;
+  /** L1 sequence only: 1-based position of the message; validation makes it unique and gap-free. */
+  order?: number;
+  /** L1 sequence only: how the message is drawn. */
+  style?: MessageStyle;
+  /** L1 sequence only: the branch or loop the message belongs to (`loop: for each item`). */
+  group?: string;
 }
 
 /** The repository state a view was generated against (SPEC §9.4). */
@@ -124,6 +173,12 @@ export interface GraphView {
   /** What the analysis could not establish — shown in the UI, never hidden (SPEC §5.4). */
   notes: string[];
   snapshot: Snapshot;
+  /**
+   * Whether a diagram could be built at all. Always `supported` for L4–L2; at L1 the
+   * agent may answer that the entity's behaviour fits no supported kind or cannot be
+   * derived reliably, and then `diagramKind` is `unsupported` with no nodes (R1/R5).
+   */
+  behavior: BehaviorInfo;
 }
 
 export function rootScope(repoName: string): ScopeRef {
@@ -265,6 +320,10 @@ export interface ContextRelation {
   status: EdgeStatus;
   /** Why the relation is unverified. Empty for confirmed relations. */
   reason: string;
+  /** L1 sequence message: its position; relations of a sequence are listed in this order. */
+  order?: number;
+  /** L1 sequence message: sync, async or return. */
+  style?: string;
 }
 
 /** The repository state a group of selected items was generated against. */
@@ -413,12 +472,14 @@ export function buildSelectionContext(
     label: e.label,
     status: e.status,
     reason: e.reason,
+    ...(e.order !== undefined ? { order: e.order } : {}),
+    ...(e.style !== undefined ? { style: e.style } : {}),
   });
   const internal: ContextRelation[] = [];
   const external: ContextRelation[] = [];
   const evidence: Evidence[] = nodes.flatMap((n) => n.evidence);
   for (const view of usedViews) {
-    for (const e of view.edges) {
+    for (const e of sequenceOrdered(view)) {
       const fromIn = resolved.has(e.from);
       const toIn = resolved.has(e.to);
       if (!fromIn && !toIn) continue;
@@ -499,6 +560,16 @@ export function buildSelectionContext(
     stale,
     limits: { paths: [...limitPaths].sort(), note: LIMITS_NOTE },
   };
+}
+
+/**
+ * The edges of a view in the order they should be read: for a sequence the messages by
+ * `order` (a message without one goes last, stable), for everything else as listed.
+ */
+export function sequenceOrdered(view: GraphView): GraphEdge[] {
+  if (view.diagramKind !== 'sequence') return view.edges;
+  const rank = (e: GraphEdge) => e.order ?? Number.MAX_SAFE_INTEGER;
+  return [...view.edges].sort((a, b) => rank(a) - rank(b));
 }
 
 export type ExpandDirection = 'in' | 'out' | 'both';

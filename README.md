@@ -10,8 +10,8 @@ Product concept and scope: [`docs/SPEC.md`](docs/SPEC.md). The repository name i
 
 ## What works today
 
-Steps 1–4 of 5 of the product cycle — **Explore**, **Zoom**, **Select** and
-**Prompt → Change → Verify** (SPEC §6.1–6.5):
+All five steps of the product cycle — **Explore**, **Zoom**, **Select**,
+**Prompt → Change → Verify** and a limited **behaviour view** (SPEC §6.1–6.5, FR-13):
 
 - **L4** — the applications, packages and runtime boundaries of the repository.
 - **L3** — the subsystems of one application, generated **when you open it** and not
@@ -24,7 +24,11 @@ Steps 1–4 of 5 of the product cycle — **Explore**, **Zoom**, **Select** and
   **boundary node linked to its subsystem** — one click takes you there — and an entity
   shared with a neighbouring subsystem is listed as a member of both rather than drawn
   twice (SPEC §5.1).
-- Breadcrumbs L4 → L3 → L2; going back up is served from memory, not regenerated.
+- **L1** — the behaviour of one entity of an L2 view, generated when you open it: a
+  **state machine**, a **sequence** or a **flow**, whichever explains the implementation
+  best — or an honest **"not available"** with the agent's reason when none does. See
+  [Behaviour views (L1)](#behaviour-views-l1).
+- Breadcrumbs L4 → L3 → L2 → L1; going back up is served from memory, not regenerated.
 - Clicking a node shows what it is, which subsystems it belongs to, and its code links;
   a link opens the file with the evidence lines highlighted.
 - **Selection across levels** (SPEC §6.3, FR-07): click, Shift/Ctrl/Cmd+click and a
@@ -57,13 +61,62 @@ Steps 1–4 of 5 of the product cycle — **Explore**, **Zoom**, **Select** and
   other affected schemas get an **Update** button. See
   [Editing and verifying](#editing-and-verifying).
 
-Not built yet (step 5): L1 behaviour views. The graph model and the agent interface are
-shaped for it — a new level is a prompt builder registered in
-`src/server/agent/prompts.ts`.
-
 **MVP limits:** analyzed projects must be TypeScript or JavaScript. A schema is an
 interpretation of code at one moment, not documentation — and a relation SoftZoom does
 not draw is not proof that none exists (SPEC §R5).
+
+## Behaviour views (L1)
+
+An L2 entity whose behaviour can be shown — a function, a method, a class, a service, a
+state store, a handler — is openable (the L2 agent marks it; pure types and constants are
+not). Opening it generates its **L1**: the same cache → agent → validation pipeline, the
+same scoping (only the files that define the entity are analyzed), the same stale
+banner, progress, Cancel and Regenerate. The agent reads the entity and picks **exactly
+one** of three kinds (SPEC §5.3):
+
+- **State machine** — states with an **initial** (dot) and **final** (double border)
+  marker and the **transitions** between them, each labelled with the event or condition
+  that triggers it. Laid out top to bottom.
+- **Sequence** — **participants** across the top with lifelines, and the **messages**
+  between them top to bottom in execution order: a solid arrow with a filled head is a
+  synchronous call, an open head an asynchronous one, a dashed arrow a return; a labelled
+  band spans the messages of a branch or loop (`loop: for each item`, `alt: valid`).
+  Participants outside the entity — a caller, a callee, a store — are dashed boundary
+  participants with the evidence of the call site only.
+- **Flow** — **steps** with a start, ends and **decisions**, the branch condition on the
+  arrow leaving a decision.
+
+Every state, transition, participant, message and step carries evidence and goes through
+the same validation as any other level: an element whose evidence does not resolve is
+dropped, a transition or message the agent could not confirm is drawn **unverified**.
+On top of that the message order of a sequence is checked and repaired (duplicates, gaps
+and missing numbers are renumbered in the order given and reported), and a role or arrow
+style outside the known set is cleared and reported.
+
+**Not available.** When the behaviour fits none of the three kinds, or cannot be derived
+reliably from the code — dynamic dispatch, behaviour decided by runtime configuration,
+too little code — the agent answers `behavior.supported: false` with a concrete reason,
+and the UI shows **"Behaviour view not available for …"** with that reason, Regenerate
+and the breadcrumb back. The server never fills a diagram in for it, and the answer is
+cached like any other result so you do not pay twice (SPEC R1, R5). A reply that claims
+"unsupported" but sends states anyway has them dropped and reported.
+
+States, participants and messages go into the selection basket like any other node or
+relation; the Context panel, `POST /api/context` and the Markdown list a sequence's
+messages in execution order (`#1 caller → handler (calls, request, sync)`). An applied
+change that touches the entity's file marks its L1 view affected, like the levels above.
+
+With `SOFTSCOPE_FAKE_AGENT=1` the L1 is decided from the scope paths alone: a file whose
+name contains `connection`, `state` or `machine` gets a fixed state machine (with one
+transition deliberately unverified), a file under `server/` or named `http*` / `cli*` a
+three-participant sequence with an async message and a return, anything else "not
+available" with a reason — every element pointing at real lines of that file.
+
+**Limits.** Static analysis only: a diagram shows what the agent could read in the
+code, not what happens at runtime. One kind per entity, chosen by the agent. Nested
+branches and loops are flattened to one level of grouping. And as everywhere in
+SoftZoom, a transition or message that is absent from the diagram is not proof that it
+does not happen (SPEC §R5).
 
 ## Selecting and building context
 
@@ -263,7 +316,8 @@ npm run typecheck    # tsc -b across shared, server, web and tests
 
 To work on the UI without spending tokens, run the server with
 `SOFTSCOPE_FAKE_AGENT=1`: a stand-in agent derives a clickable graph from the repository
-index alone. It marks every relation unverified, because it read no code.
+index alone, down to a fixed L1 per entity (see [Behaviour views](#behaviour-views-l1)).
+It marks every relation of L4–L2 unverified, because it read no code.
 
 ### Environment variables
 
@@ -293,7 +347,7 @@ src/server/
   jobs.ts       running agent calls with buffered progress and cancel, shared by generation and changes
   session.ts    one open repository: cache -> agent -> validation, lazy per scope
   http/         the local API
-src/web/        React + Vite UI, React Flow canvas with a dagre layout
+src/web/        React + Vite UI, React Flow canvas with a dagre layout, SVG sequence canvas
 test/           vitest suite, with a small fixture repository under test/fixtures/
 ```
 

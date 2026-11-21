@@ -5,7 +5,7 @@ import { validateView } from '../src/server/validation/validate';
 import { parseAgentGraph } from '../src/shared/agent-schema';
 import { repoSnapshot } from '../src/server/indexer/git';
 import { rootScope, type ScopeRef, type Snapshot } from '../src/shared/graph';
-import { agentGraph, cleanupTemps, copyFixture } from './helpers';
+import { agentGraph, cleanupTemps, copyFixture, l1Graph } from './helpers';
 
 afterAll(cleanupTemps);
 
@@ -415,5 +415,236 @@ describe('scope and drill-in', () => {
     );
 
     expect(view.nodes[0]!.paths).toEqual(['src/index.ts']);
+  });
+});
+
+describe('behaviour views (L1)', () => {
+  const FILE = 'src/server/connection.ts';
+  const l1Scope: ScopeRef = {
+    level: 'L1',
+    id: 'L2:L3:L4:root/app/http/connection',
+    label: 'Connection',
+    paths: [FILE],
+  };
+  const at = (startLine: number, endLine = startLine) => [{ file: FILE, startLine, endLine }];
+  const runL1 = (graph: ReturnType<typeof agentGraph>) => validateView({ repoPath: repo, scope: l1Scope, snapshot, raw: graph });
+
+  it('parses a reply cached before the behaviour fields existed, with "supported" defaults', () => {
+    const older = agentGraph(
+      [{ slug: 'a', evidence: [{ file: 'src/index.ts', startLine: 1, endLine: 1 }] }],
+      [{ from: 'a', to: 'a', evidence: [{ file: 'src/index.ts', startLine: 1, endLine: 1 }] }],
+    );
+    const { behavior: _b, ...withoutBehavior } = older;
+    const { role: _r, ...node } = older.nodes[0]!;
+    const { order: _o, style: _s, group: _g, ...edge } = older.edges[0]!;
+    const parsed = parseAgentGraph({ ...withoutBehavior, nodes: [node], edges: [edge] });
+
+    expect(parsed.behavior).toEqual({ supported: true, reason: '' });
+    expect(parsed.nodes[0]!.role).toBe('');
+    expect(parsed.edges[0]).toMatchObject({ order: 0, style: '', group: '' });
+    const { view, issues } = run(parsed);
+    expect(view.behavior).toEqual({ supported: true, reason: '' });
+    expect(view.nodes[0]!.role).toBeUndefined();
+    expect(view.edges[0]!.order).toBeUndefined();
+    expect(issues).toEqual([]);
+  });
+
+  it('keeps the roles of a state machine, drops a state without evidence with its transitions, flags an unverified one', () => {
+    const { view, issues } = runL1(
+      l1Graph(
+        'state-machine',
+        [
+          { slug: 'idle', kind: 'state', role: 'initial', evidence: at(8, 9) },
+          { slug: 'connecting', kind: 'state', role: 'state', evidence: at(10, 13) },
+          { slug: 'closed', kind: 'state', role: 'final', evidence: at(18, 19) },
+          { slug: 'ghost', kind: 'state', role: 'state', evidence: [{ file: 'src/server/nope.ts', startLine: 1, endLine: 1 }] },
+        ],
+        [
+          { from: 'idle', to: 'connecting', kind: 'transitions-to', label: 'connect', evidence: at(9) },
+          { from: 'connecting', to: 'closed', kind: 'transitions-to', label: 'close', confirmed: false, reason: 'not read', evidence: [] },
+          { from: 'connecting', to: 'ghost', kind: 'transitions-to', label: 'vanish', evidence: at(12) },
+        ],
+      ),
+    );
+
+    expect(view.diagramKind).toBe('state-machine');
+    expect(view.behavior).toEqual({ supported: true, reason: '' });
+    expect(view.nodes.map((n) => [n.title, n.role, n.level])).toEqual([
+      ['idle', 'initial', 'L1'],
+      ['connecting', 'state', 'L1'],
+      ['closed', 'final', 'L1'],
+    ]);
+    expect(view.nodes[0]!.id).toBe(`L1:${l1Scope.id}/idle`);
+    expect(view.edges.map((e) => [e.label, e.status])).toEqual([
+      ['connect', 'confirmed'],
+      ['close', 'unverified'],
+    ]);
+    // Not a sequence: no message numbers in the ids, none on the edges.
+    expect(view.edges.every((e) => !e.id.includes('#') && e.order === undefined)).toBe(true);
+    expect(issues.map((i) => i.kind)).toEqual(['evidence-missing-file', 'node-dropped', 'edge-dropped', 'edge-unverified']);
+  });
+
+  it('clears a role the diagram kind does not allow, and any role outside a behaviour view', () => {
+    const { view, issues } = runL1(
+      l1Graph('state-machine', [
+        { slug: 'a', role: 'participant', evidence: at(1) },
+        { slug: 'b', role: 'final', evidence: at(2) },
+      ]),
+    );
+    expect(view.nodes.map((n) => n.role)).toEqual([undefined, 'final']);
+    expect(issues).toEqual([expect.objectContaining({ kind: 'role-cleared', nodeId: `L1:${l1Scope.id}/a` })]);
+
+    const plain = run(agentGraph([{ slug: 'x', role: 'initial', evidence: [{ file: 'src/index.ts', startLine: 1, endLine: 1 }] }]));
+    expect(plain.view.nodes[0]!.role).toBeUndefined();
+    expect(plain.issues.map((i) => i.kind)).toEqual(['role-cleared']);
+  });
+
+  it('renumbers duplicate, gapped and missing message orders, keeps same-pair messages apart, clears a bad style', () => {
+    const { view, issues } = runL1(
+      l1Graph(
+        'sequence',
+        [
+          { slug: 'client', kind: 'participant', role: 'participant', boundary: true, evidence: at(1) },
+          { slug: 'conn', kind: 'participant', role: 'participant', evidence: at(23, 30) },
+        ],
+        [
+          { from: 'client', to: 'conn', kind: 'calls', label: 'send', order: 2, style: 'sync', evidence: at(26) },
+          { from: 'conn', to: 'client', kind: 'returns', label: 'state', order: 2, style: 'return', evidence: at(28) },
+          { from: 'client', to: 'conn', kind: 'calls', label: 'send again', order: 0, style: 'async', group: 'loop: retry', evidence: at(27) },
+          { from: 'client', to: 'conn', kind: 'calls', label: 'connect', order: 1, style: 'bogus', evidence: at(27) },
+        ],
+      ),
+    );
+
+    // Given [2, 2, -, 1] → numbered ones by value (ties in order of appearance), unnumbered last.
+    expect(view.edges.map((e) => [e.label, e.order, e.style ?? null, e.group ?? null])).toEqual([
+      ['send', 2, 'sync', null],
+      ['state', 3, 'return', null],
+      ['send again', 4, 'async', 'loop: retry'],
+      ['connect', 1, null, null],
+    ]);
+    // Three messages between the same pair with the same kind: three edges, not one merged.
+    const ids = view.edges.map((e) => e.id);
+    expect(new Set(ids).size).toBe(4);
+    expect(ids[0]).toBe(`L1:${l1Scope.id}|L1:${l1Scope.id}/client->L1:${l1Scope.id}/conn|calls#2`);
+    expect(issues.filter((i) => i.kind === 'sequence-order-fixed')).toHaveLength(1);
+    expect(issues.filter((i) => i.kind === 'style-cleared')).toEqual([
+      expect.objectContaining({ kind: 'style-cleared', edgeId: ids[3] }),
+    ]);
+    expect(view.nodes.map((n) => [n.role, n.boundary])).toEqual([
+      ['participant', true],
+      ['participant', false],
+    ]);
+  });
+
+  it('does not report a well-numbered sequence, and a dropped participant takes its messages with it', () => {
+    const { view, issues } = runL1(
+      l1Graph(
+        'sequence',
+        [
+          { slug: 'a', role: 'participant', evidence: at(1) },
+          { slug: 'b', role: 'participant', evidence: at(2) },
+          { slug: 'gone', role: 'participant', evidence: [{ file: 'src/server/nope.ts', startLine: 1, endLine: 1 }] },
+        ],
+        [
+          { from: 'a', to: 'b', kind: 'calls', order: 1, evidence: at(3) },
+          { from: 'b', to: 'gone', kind: 'calls', order: 2, evidence: at(4) },
+          { from: 'b', to: 'a', kind: 'returns', order: 3, style: 'return', evidence: at(5) },
+        ],
+      ),
+    );
+    // The surviving messages are 1 and 2: the gap the dropped message left is closed.
+    expect(view.edges.map((e) => [e.kind, e.order])).toEqual([
+      ['calls', 1],
+      ['returns', 2],
+    ]);
+    expect(issues.map((i) => i.kind)).toEqual(['evidence-missing-file', 'node-dropped', 'edge-dropped', 'sequence-order-fixed']);
+  });
+
+  it('drops order, style and group outside a sequence, reporting only the style', () => {
+    const { view, issues } = run(
+      agentGraph(
+        [
+          { slug: 'a', evidence: [{ file: 'src/index.ts', startLine: 1, endLine: 1 }] },
+          { slug: 'b', evidence: [{ file: 'src/util/log.ts', startLine: 1, endLine: 1 }] },
+        ],
+        [{ from: 'a', to: 'b', order: 3, style: 'async', group: 'alt: x', evidence: [{ file: 'src/index.ts', startLine: 1, endLine: 1 }] }],
+      ),
+    );
+    expect(view.edges[0]!.order).toBeUndefined();
+    expect(view.edges[0]!.style).toBeUndefined();
+    expect(view.edges[0]!.group).toBeUndefined();
+    expect(issues.map((i) => i.kind)).toEqual(['style-cleared']);
+  });
+
+  it('keeps an unsupported reply unsupported: no nodes, the reason, no diagram filled in', () => {
+    const { view, issues } = runL1(
+      l1Graph('unsupported', [], [], { supported: false, reason: 'the handlers are looked up in a runtime table' }),
+    );
+    expect(view.diagramKind).toBe('unsupported');
+    expect(view.nodes).toEqual([]);
+    expect(view.edges).toEqual([]);
+    expect(view.behavior).toEqual({ supported: false, reason: 'the handlers are looked up in a runtime table' });
+    expect(view.scope).toEqual(l1Scope);
+    expect(issues).toEqual([]);
+  });
+
+  it('reports and drops the nodes of a reply that claims to be unsupported', () => {
+    const { view, issues } = runL1(
+      l1Graph('state-machine', [{ slug: 'idle', role: 'initial', evidence: at(8) }], [], {
+        supported: false,
+        reason: 'too little code',
+      }),
+    );
+    expect(view.diagramKind).toBe('unsupported');
+    expect(view.nodes).toEqual([]);
+    expect(view.behavior.reason).toBe('too little code');
+    expect(issues).toEqual([expect.objectContaining({ kind: 'behavior-inconsistent' })]);
+    expect(issues[0]!.message).toContain('1 node(s)');
+  });
+
+  it('gives an unsupported reply without a reason a fallback reason and reports it', () => {
+    const { view, issues } = runL1(l1Graph('unsupported', [], [], { supported: false, reason: '   ' }));
+    expect(view.behavior.supported).toBe(false);
+    expect(view.behavior.reason.length).toBeGreaterThan(0);
+    expect(issues.map((i) => i.kind)).toEqual(['behavior-inconsistent']);
+  });
+
+  it('treats diagramKind "unsupported" with supported=true as unsupported, and reports it', () => {
+    const { view, issues } = runL1(l1Graph('unsupported', [], [], { supported: true, reason: '' }));
+    expect(view.diagramKind).toBe('unsupported');
+    expect(view.behavior.supported).toBe(false);
+    expect(issues.filter((i) => i.kind === 'behavior-inconsistent').length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('reports a supported L1 reply that ends up with no element, and not an empty L4 one', () => {
+    const l1 = runL1(l1Graph('flow', [{ slug: 'start', role: 'start', evidence: [{ file: 'src/server/nope.ts', startLine: 1, endLine: 1 }] }]));
+    expect(l1.view.nodes).toEqual([]);
+    expect(l1.view.behavior.supported).toBe(true);
+    expect(l1.issues.map((i) => i.kind)).toEqual(['evidence-missing-file', 'node-dropped', 'behavior-inconsistent']);
+
+    const l4 = run(agentGraph([]));
+    expect(l4.issues).toEqual([]);
+    expect(l4.view.behavior).toEqual({ supported: true, reason: '' });
+  });
+
+  it('keeps the roles of a flow', () => {
+    const { view, issues } = runL1(
+      l1Graph(
+        'flow',
+        [
+          { slug: 'start', role: 'start', evidence: at(6) },
+          { slug: 'which', role: 'decision', evidence: at(7) },
+          { slug: 'done', role: 'end', evidence: at(21) },
+        ],
+        [
+          { from: 'start', to: 'which', kind: 'next', evidence: at(7) },
+          { from: 'which', to: 'done', kind: 'next', label: 'closed', evidence: at(19) },
+        ],
+      ),
+    );
+    expect(view.nodes.map((n) => n.role)).toEqual(['start', 'decision', 'end']);
+    expect(view.edges[1]!.label).toBe('closed');
+    expect(issues).toEqual([]);
   });
 });

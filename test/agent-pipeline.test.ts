@@ -21,6 +21,7 @@ import {
   copyFixture,
   copyFixtureAsGitRepo,
   gitCheckout,
+  l1Graph,
   switchToNewBranch,
   tempCache,
 } from './helpers';
@@ -31,6 +32,9 @@ const CORE_ID = 'L4:root/core';
 const UI_ID = 'L4:root/ui';
 const MATH_ID = `L3:${CORE_ID}/math`;
 const SCHEMA_ID = `L3:${CORE_ID}/schema`;
+const VALIDATION_ID = `L2:${SCHEMA_ID}/validation`;
+const SCHEMA_CONST_ID = `L2:${SCHEMA_ID}/schema-const`;
+const INDEX_FILE = 'packages/core/src/index.ts';
 
 /** L4: two packages plus a boundary node, both packages openable. */
 const l4Reply = agentGraph(
@@ -97,6 +101,8 @@ const schemaL2Reply = agentGraph(
       kind: 'module',
       title: 'validation',
       paths: ['packages/core/src/index.ts'],
+      // The one entity whose behaviour can be opened at L1.
+      hasDetail: true,
       evidence: [{ file: 'packages/core/src/index.ts', startLine: 1, endLine: 5 }],
     },
     {
@@ -131,6 +137,25 @@ const schemaL2Reply = agentGraph(
   { diagramKind: 'data-flow' },
 );
 
+/** L1 of the "validation" entity: a small state machine over the lines of index.ts. */
+const validationL1Reply = l1Graph(
+  'state-machine',
+  [
+    { slug: 'empty', kind: 'state', role: 'initial', evidence: [{ file: INDEX_FILE, startLine: 1, endLine: 1 }] },
+    { slug: 'parsed', kind: 'state', role: 'state', evidence: [{ file: INDEX_FILE, startLine: 2, endLine: 2 }] },
+    { slug: 'valid', kind: 'state', role: 'final', evidence: [{ file: INDEX_FILE, startLine: 3, endLine: 3 }] },
+  ],
+  [
+    { from: 'empty', to: 'parsed', kind: 'transitions-to', label: 'parse', evidence: [{ file: INDEX_FILE, startLine: 2, endLine: 2 }] },
+    { from: 'parsed', to: 'valid', kind: 'transitions-to', label: 'ok', confirmed: false, reason: 'the guard was not read', evidence: [] },
+  ],
+);
+
+const unsupportedL1Reply = l1Graph('unsupported', [], [], {
+  supported: false,
+  reason: 'validation is a table of zod schemas; there is no sequence of steps to show',
+});
+
 let repo: string;
 let cache: FileCache;
 let agent: FakeSchemaAgent;
@@ -144,7 +169,12 @@ beforeEach(() => {
   repo = copyFixtureAsGitRepo();
   cache = tempCache();
   agent = new FakeSchemaAgent({
-    replies: { 'L4:root': l4Reply, [`L3:${CORE_ID}`]: coreL3Reply, [`L2:${SCHEMA_ID}`]: schemaL2Reply },
+    replies: {
+      'L4:root': l4Reply,
+      [`L3:${CORE_ID}`]: coreL3Reply,
+      [`L2:${SCHEMA_ID}`]: schemaL2Reply,
+      [`L1:${VALIDATION_ID}`]: validationL1Reply,
+    },
     strict: true,
   });
   session = newSession();
@@ -281,8 +311,13 @@ describe('lazy L3', () => {
     await expect(session.graph({ level: 'L3', scopeId: 'L4:root/nope' })).rejects.toThrow(ScopeNotFoundError);
   });
 
-  it('reports a level that has no prompt builder yet', async () => {
-    await expect(session.graph({ level: 'L1', scopeId: SCHEMA_ID })).rejects.toThrow(LevelNotSupportedError);
+  it('reports an L1 scope that no L2 view offers rather than inventing one', async () => {
+    // Every level has a prompt builder now; the unknown scope is what fails, not the level.
+    await expect(session.graph({ level: 'L1', scopeId: SCHEMA_ID })).rejects.toThrow(ScopeNotFoundError);
+    await expect(session.graph({ level: 'L1', scopeId: `L2:${SCHEMA_ID}/ghost` })).rejects.toThrow(ScopeNotFoundError);
+    expect(agent.callsFor('L1', SCHEMA_ID)).toBe(0);
+    expect(agent.calls.every((c) => c.scope.level !== 'L1')).toBe(true);
+    expect(new LevelNotSupportedError('L1').message).toContain('L1');
   });
 });
 
@@ -307,8 +342,8 @@ describe('lazy L2', () => {
     // The neighbouring subsystem was never analyzed (SPEC 6.2).
     expect(agent.callsFor('L2', MATH_ID)).toBe(0);
     expect(agent.calls).toHaveLength(3);
-    // Entities are not opened further in this version.
-    expect(schema.openable).toEqual([]);
+    // Only the entity with detail opens into its L1 behaviour view; the constant and the boundary nodes do not.
+    expect(schema.openable).toEqual([{ level: 'L1', id: VALIDATION_ID, label: 'validation', paths: ['packages/core/src/index.ts'] }]);
   });
 
   it('hands the agent the parent L3 node and the neighbouring subsystems', async () => {
@@ -613,7 +648,9 @@ describe('L2 prompt', () => {
     expect(prompt).toContain('memberOf');
     expect(prompt).toContain('"component-graph"');
     expect(prompt).toContain('"data-flow"');
-    expect(prompt).toContain('hasDetail=false');
+    // Entities whose behaviour can be shown at L1 are openable now.
+    expect(prompt).toContain('hasDetail=true');
+    expect(prompt).not.toMatch(/entities are not opened further/);
   });
 
   it('still builds without a parent, saying no neighbours are known', () => {
@@ -624,9 +661,163 @@ describe('L2 prompt', () => {
     expect(prompt).not.toContain('opened the L3 node');
   });
 
-  it('has no builder for L1', () => {
-    expect(generatableLevels()).toEqual(['L4', 'L3', 'L2']);
-    expect(supportsLevel('L1')).toBe(false);
+  it('has a builder for every level, L1 included', () => {
+    expect(generatableLevels()).toEqual(['L4', 'L3', 'L2', 'L1']);
+    expect(supportsLevel('L1')).toBe(true);
+  });
+});
+
+describe('lazy L1', () => {
+  const openValidation = async () => {
+    await session.graph({ level: 'L4', scopeId: 'root' });
+    await session.graph({ level: 'L3', scopeId: CORE_ID });
+    await session.graph({ level: 'L2', scopeId: SCHEMA_ID });
+    return session.graph({ level: 'L1', scopeId: VALIDATION_ID });
+  };
+
+  it('generates the L1 of the opened entity only, through the same pipeline as every other level', async () => {
+    const l1 = await openValidation();
+
+    expect(l1.cached).toBe(false);
+    expect(l1.stale).toBe(false);
+    expect(l1.view.scope).toEqual({ level: 'L1', id: VALIDATION_ID, label: 'validation', paths: [INDEX_FILE] });
+    expect(l1.view.diagramKind).toBe('state-machine');
+    expect(l1.view.behavior).toEqual({ supported: true, reason: '' });
+    expect(l1.view.nodes.map((n) => [n.title, n.role])).toEqual([
+      ['empty', 'initial'],
+      ['parsed', 'state'],
+      ['valid', 'final'],
+    ]);
+    expect(l1.view.edges.map((e) => [e.label, e.status])).toEqual([
+      ['parse', 'confirmed'],
+      ['ok', 'unverified'],
+    ]);
+    expect(l1.issues.map((i) => i.kind)).toEqual(['edge-unverified']);
+    // The bottom: nothing opens from an L1 view.
+    expect(l1.openable).toEqual([]);
+    expect(l1.view.nodes.every((n) => n.childScope === null)).toBe(true);
+    expect(agent.callsFor('L1', VALIDATION_ID)).toBe(1);
+    expect(agent.callsFor('L1', SCHEMA_CONST_ID)).toBe(0);
+    expect(agent.calls).toHaveLength(4);
+  });
+
+  it('hands the agent the opened L2 entity as the parent of the L1 scope', async () => {
+    await openValidation();
+    const request = agent.calls.at(-1)!;
+    expect(request.scope.level).toBe('L1');
+    expect(request.parent?.scope).toMatchObject({ level: 'L2', id: SCHEMA_ID });
+    expect(request.parent?.node.title).toBe('validation');
+    expect(request.parent?.node.childScope?.id).toBe(VALIDATION_ID);
+  });
+
+  it('serves the L1 from the cache afterwards, in this session and in a fresh one', async () => {
+    await openValidation();
+    const again = await session.graph({ level: 'L1', scopeId: VALIDATION_ID });
+    expect(again.cached).toBe(true);
+    expect(agent.calls).toHaveLength(4);
+
+    const later = await newSession().graph({ level: 'L1', scopeId: VALIDATION_ID });
+    expect(later.cached).toBe(true);
+    expect(later.view.diagramKind).toBe('state-machine');
+    expect(later.view.nodes[0]!.role).toBe('initial');
+    expect(agent.calls).toHaveLength(4);
+  });
+
+  it('caches an unsupported reply too, so the user does not pay twice; Regenerate asks again', async () => {
+    agent.set('L1', VALIDATION_ID, unsupportedL1Reply);
+    const first = await openValidation();
+
+    expect(first.cached).toBe(false);
+    expect(first.view.diagramKind).toBe('unsupported');
+    expect(first.view.nodes).toEqual([]);
+    expect(first.view.behavior).toEqual({ supported: false, reason: unsupportedL1Reply.behavior.reason });
+    expect(first.issues).toEqual([]);
+
+    const second = await session.graph({ level: 'L1', scopeId: VALIDATION_ID });
+    expect(second.cached).toBe(true);
+    expect(second.view.behavior.supported).toBe(false);
+    expect(agent.callsFor('L1', VALIDATION_ID)).toBe(1);
+
+    agent.set('L1', VALIDATION_ID, validationL1Reply);
+    const regenerated = await session.graph({ level: 'L1', scopeId: VALIDATION_ID, refresh: true });
+    expect(regenerated.cached).toBe(false);
+    expect(regenerated.view.diagramKind).toBe('state-machine');
+    expect(agent.callsFor('L1', VALIDATION_ID)).toBe(2);
+  });
+
+  it('serves the previous L1 marked stale after a commit, and regenerates on request', async () => {
+    const first = await openValidation();
+    appendFileSync(join(repo, 'packages/core/src/math.ts'), '\nexport const eight = 8;\n');
+    commitAll(repo, 'second');
+
+    const later = newSession();
+    const stale = await later.graph({ level: 'L1', scopeId: VALIDATION_ID });
+    expect(stale.cached).toBe(true);
+    expect(stale.stale).toBe(true);
+    expect(stale.view.snapshot.commit).toBe(first.view.snapshot.commit);
+    expect(stale.view.diagramKind).toBe('state-machine');
+    expect(agent.callsFor('L1', VALIDATION_ID)).toBe(1);
+
+    const fresh = await later.graph({ level: 'L1', scopeId: VALIDATION_ID, refresh: true });
+    expect(fresh.stale).toBe(false);
+    expect(agent.callsFor('L1', VALIDATION_ID)).toBe(2);
+  });
+
+  it('cancels a running L1 generation through the job registry and caches nothing', async () => {
+    agent = new FakeSchemaAgent({
+      replies: {
+        'L4:root': l4Reply,
+        [`L3:${CORE_ID}`]: coreL3Reply,
+        [`L2:${SCHEMA_ID}`]: schemaL2Reply,
+        [`L1:${VALIDATION_ID}`]: validationL1Reply,
+      },
+      strict: true,
+      delayMs: 200,
+    });
+    session = newSession();
+    await session.graph({ level: 'L4', scopeId: 'root' });
+    await session.graph({ level: 'L3', scopeId: CORE_ID });
+    await session.graph({ level: 'L2', scopeId: SCHEMA_ID });
+
+    const events: ProgressEvent[] = [];
+    const pending = session.graph({ level: 'L1', scopeId: VALIDATION_ID });
+    await waitFor(() => agent.callsFor('L1', VALIDATION_ID) === 1);
+    expect(session.subscribe('L1', VALIDATION_ID, (e) => events.push(e))).not.toBeNull();
+    expect(session.cancel('L1', VALIDATION_ID)).toBe(true);
+
+    await expect(pending).rejects.toThrow(GenerationCancelledError);
+    expect(events.map((e) => e.type)).toEqual(['started', 'cancelled']);
+    const stateId = session.liveSnapshot().stateId;
+    expect(cache.get({ repoPath: repo, stateId, level: 'L1', scopeId: VALIDATION_ID, agent: 'fake' })).toBeNull();
+
+    const retry = await session.graph({ level: 'L1', scopeId: VALIDATION_ID });
+    expect(retry.cached).toBe(false);
+    expect(agent.callsFor('L1', VALIDATION_ID)).toBe(2);
+  });
+
+  it('builds an L1 prompt that names the three kinds, the roles, the ordering and the unsupported answer', async () => {
+    await openValidation();
+    const request = agent.calls.at(-1)!;
+    const { system, prompt } = buildPrompt(request);
+
+    expect(system).toContain('EVIDENCE OR IT DOES NOT EXIST');
+    expect(prompt).toContain(`scope: L1 ${VALIDATION_ID} (validation)`);
+    expect(prompt).toContain(`scope paths: ${INDEX_FILE}`);
+    expect(prompt).toContain('opened the L2 node "validation"');
+    expect(prompt).toContain('"state-machine"');
+    expect(prompt).toContain('"sequence"');
+    expect(prompt).toContain('"flow"');
+    expect(prompt).toContain('"initial"');
+    expect(prompt).toContain('"final"');
+    expect(prompt).toContain('"participant"');
+    expect(prompt).toContain('"decision"');
+    expect(prompt).toContain('order = 1, 2, 3');
+    expect(prompt).toContain('"async"');
+    expect(prompt).toContain('"return"');
+    expect(prompt).toContain('behavior.supported=false');
+    expect(prompt).toContain('boundary=true');
+    expect(prompt).toMatch(/absent\s+from your diagram is not a claim that it does not exist/);
+    expect(prompt).not.toContain('packages/ui/src/index.tsx');
   });
 });
 
@@ -945,5 +1136,87 @@ describe('fake agent for UI work', () => {
     const openable = l4.openable[0]!;
     const l3 = await uiSession.graph({ level: 'L3', scopeId: openable.id });
     expect(l3.view.scope.id).toBe(openable.id);
+
+    // L3 → L2 → L1: every module group is openable, so the whole path can be clicked.
+    const l2 = await uiSession.graph({ level: 'L2', scopeId: l3.openable[0]!.id });
+    expect(l2.view.scope.level).toBe('L2');
+    expect(l2.openable.length).toBeGreaterThan(0);
+    const l1 = await uiSession.graph({ level: 'L1', scopeId: l2.openable[0]!.id });
+    expect(l1.view.scope.level).toBe('L1');
+    expect(['state-machine', 'sequence', 'flow', 'unsupported']).toContain(l1.view.diagramKind);
+    expect(l1.openable).toEqual([]);
+    // The core package's src has neither a state-machine-like file nor a server file.
+    expect(l1.view.diagramKind).toBe('unsupported');
+    expect(l1.view.behavior.reason).toContain('packages/core/src/index.ts');
+  });
+
+  it('answers L1 deterministically from the scope paths: state machine, sequence or unsupported', () => {
+    const index = session.index();
+    const l1 = (paths: string[]) =>
+      indexDerivedReply({ repoPath: repo, index, scope: { level: 'L1', id: `L2:x/${paths.join('-')}`, label: 'entity', paths } });
+
+    const machine = l1(['src/server']);
+    expect(machine.diagramKind).toBe('state-machine');
+    expect(machine.behavior.supported).toBe(true);
+    expect(machine.nodes.map((n) => [n.slug, n.role])).toEqual([
+      ['idle', 'initial'],
+      ['connecting', 'state'],
+      ['open', 'state'],
+      ['failed', 'state'],
+      ['closed', 'final'],
+    ]);
+    expect(machine.nodes.every((n) => n.evidence[0]!.file === 'src/server/connection.ts')).toBe(true);
+    expect(machine.edges.map((e) => e.label)).toEqual(['connect', 'opened', 'error', 'close', 'retry']);
+    expect(machine.edges.filter((e) => !e.confirmed).map((e) => e.label)).toEqual(['retry']);
+    // The same decision for the file itself as the scope.
+    expect(l1(['src/server/connection.ts']).diagramKind).toBe('state-machine');
+
+    const sequence = l1(['src']);
+    expect(sequence.diagramKind).toBe('sequence');
+    expect(sequence.nodes.map((n) => [n.slug, n.role, n.boundary])).toEqual([
+      ['caller', 'participant', true],
+      ['handler', 'participant', false],
+      ['collaborator', 'participant', false],
+    ]);
+    expect(sequence.edges.map((e) => [e.order, e.style])).toEqual([
+      [1, 'sync'],
+      [2, 'async'],
+      [3, 'return'],
+    ]);
+    expect(sequence.nodes.every((n) => n.evidence[0]!.file === 'src/cli.ts')).toBe(true);
+
+    const none = l1(['src/util']);
+    expect(none.diagramKind).toBe('unsupported');
+    expect(none.behavior.supported).toBe(false);
+    expect(none.behavior.reason).toContain('src/util/log.ts');
+    expect(none.nodes).toEqual([]);
+  });
+
+  it('validates the fake state machine against the fixture: every element survives, the retry is unverified', async () => {
+    const machineAgent = new FakeSchemaAgent({ fallback: indexDerivedReply });
+    const uiSession = new RepoSession(repo, { agent: machineAgent, cache: tempCache() });
+    // A scripted L4 → L3 → L2 path that ends on the server directory, where connection.ts lives.
+    machineAgent.set('L4', 'root', agentGraph([{ slug: 'app', paths: ['src'], hasDetail: true, evidence: [{ file: 'src/index.ts', startLine: 1, endLine: 1 }] }]));
+    machineAgent.set('L3', 'L4:root/app', agentGraph([{ slug: 'server', paths: ['src/server'], hasDetail: true, evidence: [{ file: 'src/server/http.ts', startLine: 1, endLine: 1 }] }]));
+    machineAgent.set(
+      'L2',
+      'L3:L4:root/app/server',
+      agentGraph([{ slug: 'connection', kind: 'class', title: 'Connection', paths: ['src/server/connection.ts'], hasDetail: true, evidence: [{ file: 'src/server/connection.ts', startLine: 23, endLine: 30 }] }]),
+    );
+    await uiSession.graph({ level: 'L4', scopeId: 'root' });
+    await uiSession.graph({ level: 'L3', scopeId: 'L4:root/app' });
+    const l2 = await uiSession.graph({ level: 'L2', scopeId: 'L3:L4:root/app/server' });
+    const l1 = await uiSession.graph({ level: 'L1', scopeId: l2.openable[0]!.id });
+
+    expect(l1.view.diagramKind).toBe('state-machine');
+    expect(l1.view.nodes).toHaveLength(5);
+    expect(l1.view.edges.map((e) => [e.label, e.status])).toEqual([
+      ['connect', 'confirmed'],
+      ['opened', 'confirmed'],
+      ['error', 'confirmed'],
+      ['close', 'confirmed'],
+      ['retry', 'unverified'],
+    ]);
+    expect(l1.issues.map((i) => i.kind)).toEqual(['edge-unverified']);
   });
 });

@@ -7,7 +7,7 @@
  */
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { statSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import type { AgentGraph } from '../shared/agent-schema';
 import type { GraphResponse, ProgressEvent, RepoState } from '../shared/api';
 import {
@@ -89,6 +89,11 @@ export interface GraphRequest {
 }
 
 export class RepoSession {
+  /**
+   * The real, absolute path of the repository: symlinks and `..` resolved, so the same
+   * directory spelled two ways is one session (and one cache partition — a repository
+   * that used to be opened through a symlink is re-generated once after this change).
+   */
   readonly repoPath: string;
   private readonly scopes = new Map<string, ScopeRef>();
   private readonly views = new Map<string, GraphView>();
@@ -102,9 +107,10 @@ export class RepoSession {
     repoPath: string,
     private readonly deps: SessionDeps,
   ) {
-    this.repoPath = resolve(repoPath);
-    const st = statSync(this.repoPath);
-    if (!st.isDirectory()) throw new Error(`${this.repoPath} is not a directory.`);
+    const given = resolve(repoPath);
+    const st = statSync(given);
+    if (!st.isDirectory()) throw new Error(`${given} is not a directory.`);
+    this.repoPath = realpathSync(given);
     if (this.deps.cache.root.startsWith(`${this.repoPath}/`)) {
       throw new Error('The cache directory must not live inside the analyzed repository.');
     }

@@ -3,9 +3,11 @@
  * by the agent from the code, it shows the system as it is, and it does not idealize or
  * mentally refactor anything.
  *
- * Levels are a registry on purpose. L1 (behaviour) is a later step of the product
- * cycle; it is added by registering a builder here, with no change to the agent
- * interface, the cache or the UI's navigation.
+ * Levels are a registry on purpose: a level is a builder registered here, with no change
+ * to the agent interface, the cache or the UI's navigation. L1 (behaviour, SPEC §5.3,
+ * FR-13) is the fourth entry: one entity of an L2 view, shown as the one of a state
+ * machine, a sequence or a flow that explains its implementation best — or declared
+ * `unsupported` with a reason when none does.
  */
 import type { Level } from '../../shared/graph';
 import { summarizeForAgent } from '../indexer/index';
@@ -194,21 +196,98 @@ of entities. For data-flow, every edge label must name the data that moves (the
 argument, the message, the record, the event payload); for a component graph the label
 may be the relation kind.
 
-Set paths on every non-boundary node to the files that define it. Set hasDetail=false:
-entities are not opened further in this version.
+Set paths on every non-boundary node to the files that define it.
+
+## Opening an entity (L1)
+Set hasDetail=true on a non-boundary entity whose behaviour can be shown one level
+deeper as a state machine, a sequence or a flow: a function, a method, a class, a
+service, a state store, a handler. Set hasDetail=false for a pure type, a constant, a
+configuration object, and for every boundary node.
 
 ${SIZE_GUIDANCE(24)}`,
+  };
+}
+
+function l1Prompt(req: GenerateRequest): PromptPair {
+  const digest = summarizeForAgent(req.index, req.scope);
+  const parent = req.parent;
+  return {
+    system: COMMON_RULES,
+    prompt: `${digest}
+
+# Task: build the L1 schema (behaviour) of the entity "${req.scope.label}"
+
+${
+  parent
+    ? `The user opened the L2 node "${parent.node.title}" (${parent.node.kind}) of "${parent.scope.label}": ${parent.node.summary}\n`
+    : ''
+}The entity is defined in the scope paths listed above. Read them — all of them, and
+nothing that does not take part in this entity's behaviour.
+
+## Pick exactly one kind (SPEC 5.3)
+Choose the diagramKind that explains the implementation best, and build only that one:
+
+- "state-machine" — when the entity keeps an explicit state and moves between a known
+  set of states on events or conditions (a status field with a switch, a reducer, a
+  connection or job lifecycle). Nodes are the states, with role "initial" for the state
+  the entity starts in, "final" for a state it never leaves, "state" otherwise. Edges are
+  the transitions, kind "transitions-to", with label = the event or condition that
+  triggers it. Initial and final states must be distinguishable.
+- "sequence" — when the entity is best understood as an exchange of calls between a few
+  participants over time (a request handler calling collaborators, a pipeline step).
+  Nodes are the participants, each with role "participant". Edges are the messages, in
+  execution order: order = 1, 2, 3, ... unique per message; style = "sync" for a call
+  that waits, "async" for fire-and-forget (an event, a queued job, an un-awaited
+  promise), "return" for a value going back; label = the message (the method, the
+  argument that matters). A branch or a loop is named in group, e.g. "loop: for each
+  item" or "alt: valid"; consecutive messages with the same group form one band. Keep it
+  simple: one level of grouping, no nesting.
+- "flow" — when the entity is a procedure with steps and decisions (parsing, a command,
+  a migration). Nodes are the steps, role "start" for the entry, "end" for each exit,
+  "decision" for a branch point, "step" otherwise. Edges go from step to step, with
+  label = the branch condition when leaving a decision, empty otherwise.
+
+## Boundaries
+Code outside the entity that takes part — a callee, a caller, a store, an external
+service — is a boundary node (boundary=true) with role fitting the kind (a participant,
+a state's neighbour, a step), and ONLY the evidence of the call site inside this
+entity's code. Do not describe it, do not follow it.
+
+## Evidence
+Every state, transition, participant, message and step needs real evidence: the file and
+the lines you actually read where it is declared or where it happens. A transition's
+evidence is the line that performs it; a message's evidence is the call; a decision's
+evidence is the condition. The server drops anything whose evidence does not resolve and
+marks an unconfirmed transition or message "unverified" — it does not hide it.
+
+## When no diagram is honest (R1, R5)
+If the entity's behaviour fits none of the three kinds, or cannot be derived reliably
+from the code — dynamic dispatch, behaviour decided by runtime configuration, a table of
+handlers you cannot follow, too little code to say anything — answer with
+behavior.supported=false, a concrete reason in behavior.reason (what you looked at and
+why it did not suffice), diagramKind "unsupported" and empty nodes and edges. That is a
+valid, useful answer. Never invent states, messages or steps to avoid it, and never
+pad a diagram with elements you have not read. A transition or message that is absent
+from your diagram is not a claim that it does not exist; say in notes what you did not
+follow.
+
+Set behavior.supported=true, behavior.reason="" for a supported kind. Set paths on
+non-boundary nodes to the files they live in; hasDetail=false everywhere.
+
+${SIZE_GUIDANCE(16)}`,
   };
 }
 
 /**
  * Level -> prompt builder. A level that is absent here cannot be generated; the server
  * reports it and the UI disables the drill-in affordance instead of failing a request.
+ * Every level has one now; the mechanism stays for a level that is ever removed.
  */
 export const PROMPT_BUILDERS: Partial<Record<Level, (req: GenerateRequest) => PromptPair>> = {
   L4: l4Prompt,
   L3: l3Prompt,
   L2: l2Prompt,
+  L1: l1Prompt,
 };
 
 export function generatableLevels(): Level[] {

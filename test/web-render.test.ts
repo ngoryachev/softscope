@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { createElement as h, type ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { App } from '../src/web/App';
+import { App, UnsupportedBehavior } from '../src/web/App';
 import { Breadcrumbs } from '../src/web/components/Breadcrumbs';
 import { ChangePanel } from '../src/web/components/ChangePanel';
 import { ContextPanel } from '../src/web/components/ContextPanel';
@@ -16,9 +16,11 @@ import { GenerationProgress, formatElapsed } from '../src/web/components/Generat
 import { GraphCanvas } from '../src/web/components/GraphCanvas';
 import { Inspector } from '../src/web/components/Inspector';
 import { RepoPicker } from '../src/web/components/RepoPicker';
+import { SequenceCanvas } from '../src/web/components/SequenceCanvas';
 import { SnapshotBar } from '../src/web/components/SnapshotBar';
 import type { ChangeStatus, RepoState } from '../src/shared/api';
-import type { GraphView, Snapshot } from '../src/shared/graph';
+import type { GraphEdge, GraphNode, GraphView, Snapshot } from '../src/shared/graph';
+import { SUPPORTED } from './helpers';
 
 const snapshot: Snapshot = {
   branch: 'main',
@@ -76,6 +78,7 @@ const view: GraphView = {
   ],
   notes: ['the scheduler was not read'],
   snapshot,
+  behavior: SUPPORTED,
 };
 
 const state: RepoState = {
@@ -83,7 +86,7 @@ const state: RepoState = {
   repoName: 'demo',
   isGitRepo: true,
   snapshot,
-  generatableLevels: ['L4', 'L3', 'L2'],
+  generatableLevels: ['L4', 'L3', 'L2', 'L1'],
   fakeAgent: true,
   changeAgent: 'fake',
   activeChangeId: null,
@@ -124,6 +127,7 @@ const l3View: GraphView = {
   edges: [],
   notes: [],
   snapshot,
+  behavior: SUPPORTED,
 };
 
 const l2View: GraphView = {
@@ -171,6 +175,82 @@ const l2View: GraphView = {
   ],
   notes: [],
   snapshot,
+  behavior: SUPPORTED,
+};
+
+/* Behaviour views (L1) of the handler: a state machine, a sequence and an unsupported one. */
+const l1Scope = { level: 'L1' as const, id: 'L2:L3:L4:root/server/http/handler', label: 'handleRequest', paths: ['src/http.ts'] };
+
+const l1Node = (id: string, over: Partial<GraphNode>): GraphNode => ({
+  id: `L1:${l1Scope.id}/${id}`,
+  level: 'L1',
+  kind: 'state',
+  title: id,
+  summary: `${id} summary`,
+  evidence: [{ file: 'src/http.ts', startLine: 1, endLine: 1 }],
+  boundary: false,
+  subsystemId: '',
+  memberOf: [],
+  paths: [],
+  childScope: null,
+  ...over,
+});
+const l1Edge = (from: string, to: string, kind: string, over: Partial<GraphEdge>): GraphEdge => ({
+  id: `L1:${l1Scope.id}|L1:${l1Scope.id}/${from}->L1:${l1Scope.id}/${to}|${kind}${over.order !== undefined ? `#${over.order}` : ''}`,
+  from: `L1:${l1Scope.id}/${from}`,
+  to: `L1:${l1Scope.id}/${to}`,
+  kind,
+  label: '',
+  evidence: [{ file: 'src/http.ts', startLine: 2, endLine: 2 }],
+  status: 'confirmed',
+  reason: '',
+  ...over,
+});
+
+const stateMachineView: GraphView = {
+  scope: l1Scope,
+  diagramKind: 'state-machine',
+  nodes: [
+    l1Node('idle', { role: 'initial' }),
+    l1Node('parsing', { role: 'state' }),
+    l1Node('answered', { role: 'final' }),
+  ],
+  edges: [
+    l1Edge('idle', 'parsing', 'transitions-to', { label: 'request received' }),
+    l1Edge('parsing', 'answered', 'transitions-to', { label: 'numbers valid', status: 'unverified', reason: 'the guard was not read', evidence: [] }),
+  ],
+  notes: [],
+  snapshot,
+  behavior: SUPPORTED,
+};
+
+const sequenceView: GraphView = {
+  scope: l1Scope,
+  diagramKind: 'sequence',
+  nodes: [
+    l1Node('client', { kind: 'caller', role: 'participant', boundary: true, title: 'HTTP client' }),
+    l1Node('handler', { kind: 'function', role: 'participant', title: 'handleRequest', paths: ['src/http.ts'] }),
+    l1Node('add', { kind: 'function', role: 'participant', title: 'add' }),
+  ],
+  edges: [
+    l1Edge('client', 'handler', 'calls', { label: 'GET /add', order: 1, style: 'sync' }),
+    l1Edge('handler', 'add', 'calls', { label: 'add(a, b)', order: 2, style: 'async', group: 'loop: for each pair' }),
+    l1Edge('add', 'handler', 'returns', { label: 'sum', order: 3, style: 'return', group: 'loop: for each pair' }),
+    l1Edge('handler', 'client', 'returns', { label: 'response', order: 4, style: 'return', status: 'unverified', reason: 'the response is built by the framework', evidence: [] }),
+  ],
+  notes: [],
+  snapshot,
+  behavior: SUPPORTED,
+};
+
+const unsupportedView: GraphView = {
+  scope: l1Scope,
+  diagramKind: 'unsupported',
+  nodes: [],
+  edges: [],
+  notes: ['the router is configured at runtime'],
+  snapshot,
+  behavior: { supported: false, reason: 'the handler dispatches through a runtime table of routes' },
 };
 
 const noop = () => undefined;
@@ -302,6 +382,172 @@ describe('L2 view', () => {
       );
     expect(without('add')).toContain('Go to subsystem arithmetic');
     expect(without('handler')).not.toContain('Go to subsystem');
+  });
+});
+
+describe('L1 behaviour views', () => {
+  it('lays a state machine out with initial and final markers, transition labels and its own legend', () => {
+    const html = canvas(stateMachineView);
+    expect(html).toContain('sz-node-initial');
+    expect(html).toContain('sz-node-final');
+    expect(html).not.toContain('sz-node-decision');
+    expect(html).toContain(' initial state</span>');
+    expect(html).toContain(' final state</span>');
+    // React Flow renders the edge containers but not the edge paths and labels on the
+    // server (they need measured nodes), so the transition labels are asserted through
+    // the inspector below; here only that both transitions are part of the canvas.
+    expect((html.match(/react-flow__edge/g) ?? []).length).toBeGreaterThan(0);
+    expect(html).toContain('arrow = transition, label = event or condition');
+    expect(html).toContain('unverified transition');
+    expect(html).not.toContain('double-click: open');
+  });
+
+  it('explains a flow with start, end and decision markers', () => {
+    const flow: GraphView = {
+      ...stateMachineView,
+      diagramKind: 'flow',
+      nodes: [l1Node('start', { role: 'start' }), l1Node('which', { role: 'decision' }), l1Node('end', { role: 'end' })],
+      edges: [l1Edge('start', 'which', 'next', {}), l1Edge('which', 'end', 'next', { label: 'valid' })],
+    };
+    const html = canvas(flow);
+    expect(html).toContain('sz-node-initial');
+    expect(html).toContain('sz-node-decision');
+    expect(html).toContain('sz-node-final');
+    expect(html).toContain(' decision</span>');
+    expect(html).toContain('arrow = next step, label = branch condition');
+    expect(html).toContain('unverified step');
+  });
+
+  it('renders a sequence as participants, lifelines and messages in order, with the arrow kinds told apart', () => {
+    const html = render(
+      h(SequenceCanvas, {
+        view: sequenceView,
+        basket: { nodeIds: new Set([`L1:${l1Scope.id}/handler`]), edgeIds: new Set<string>() },
+        focused: { kind: 'edge', id: sequenceView.edges[1]!.id },
+        onSelect: noop,
+        onClearFocus: noop,
+      }),
+    );
+    expect(html).toContain('<svg');
+    expect((html.match(/sz-seq-participant/g) ?? []).length).toBe(3);
+    expect((html.match(/sz-seq-lifeline/g) ?? []).length).toBe(3);
+    expect(html).toContain('HTTP client');
+    expect(html).toContain('sz-seq-boundary');
+    expect(html).toContain('stroke-dasharray="6 4"'); // the boundary participant's dashed box
+    // Messages top to bottom in execution order.
+    const positions = ['1. GET /add', '2. add(a, b)', '3. sum', '4. response (unverified)'].map((label) => html.indexOf(label));
+    expect(positions.every((p) => p >= 0)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+    expect(html).toContain('sz-seq-sync');
+    expect(html).toContain('sz-seq-async');
+    expect(html).toContain('sz-seq-return');
+    expect(html).toContain('sz-seq-unverified');
+    expect(html).toContain('url(#sz-seq-head-filled)'); // sync: filled head
+    expect(html).toContain('url(#sz-seq-head-open)'); // async and return: open head
+    expect(html).toContain('url(#sz-seq-head-open-warn)'); // the unverified return in the warn colour
+    expect(html).toContain('#b2893f');
+    // The branch/loop band and its label, once for the two consecutive messages.
+    expect((html.match(/sz-seq-group-label/g) ?? []).length).toBe(1);
+    expect(html).toContain('loop: for each pair');
+    // Basket and focus marks, and the legend.
+    expect(html).toContain('sz-seq-selected');
+    expect(html).toContain('sz-seq-focused');
+    expect(html).toContain('boundary participant (outside this entity)');
+    expect(html).toContain('async message (open head)');
+    expect(html).toContain('the response is built by the framework');
+  });
+
+  it('renders a self-message and an empty sequence without browser APIs', () => {
+    const selfView: GraphView = {
+      ...sequenceView,
+      nodes: [sequenceView.nodes[1]!],
+      edges: [l1Edge('handler', 'handler', 'calls', { label: 'retry', order: 1 })],
+    };
+    expect(render(h(SequenceCanvas, { view: selfView, basket: emptyBasket, focused: null, onSelect: noop, onClearFocus: noop }))).toContain('1. retry');
+    const empty: GraphView = { ...sequenceView, nodes: [], edges: [] };
+    expect(render(h(SequenceCanvas, { view: empty, basket: emptyBasket, focused: null, onSelect: noop, onClearFocus: noop }))).toContain('<svg');
+  });
+
+  it('shows the reason instead of a diagram when the behaviour is unsupported', () => {
+    const html = render(
+      h(UnsupportedBehavior, {
+        view: unsupportedView,
+        parent: l2View.scope,
+        busy: false,
+        onRegenerate: noop,
+        onBack: noop,
+      }),
+    );
+    expect(html).toContain('Behaviour view not available for handleRequest');
+    expect(html).toContain('the handler dispatches through a runtime table of routes');
+    expect(html).toContain('>Regenerate<');
+    expect(html).toContain('Back to L2 · http');
+    expect(html).not.toContain('<svg');
+
+    const inspectorHtml = render(h(Inspector, { view: unsupportedView, focused: null, onOpenEvidence: noop, onOpenNode: noop, onSelectNode: noop }));
+    expect(inspectorHtml).toContain('handleRequest');
+    expect(inspectorHtml).toContain('No behaviour view could be built: the handler dispatches');
+    expect(inspectorHtml).toContain('the router is configured at runtime');
+  });
+
+  it('renders breadcrumbs with all four levels', () => {
+    const html = render(h(Breadcrumbs, { stack: [view.scope, l3Scope, l2View.scope, l1Scope], onNavigate: noop }));
+    for (const level of ['L4', 'L3', 'L2', 'L1']) expect(html).toContain(`>${level}</span>`);
+    expect(html).toContain('handleRequest');
+    expect(html).toContain('L1 — Behavior');
+  });
+
+  it('shows the role of a state and the position and style of a message in the inspector', () => {
+    const state = render(
+      h(Inspector, { view: stateMachineView, focused: { kind: 'node', id: `L1:${l1Scope.id}/idle` }, onOpenEvidence: noop, onOpenNode: noop, onSelectNode: noop }),
+    );
+    expect(state).toContain('>initial state<');
+    expect(state).toContain('src/http.ts:1');
+    expect(state).toContain('request received'); // the transition in the relations list
+    expect(state).not.toContain('Open L');
+
+    const transition = render(
+      h(Inspector, { view: stateMachineView, focused: { kind: 'edge', id: stateMachineView.edges[1]!.id }, onOpenEvidence: noop, onOpenNode: noop, onSelectNode: noop }),
+    );
+    expect(transition).toContain('transition: numbers valid');
+    expect(transition).toContain('the guard was not read');
+
+    const message = render(
+      h(Inspector, { view: sequenceView, focused: { kind: 'edge', id: sequenceView.edges[1]!.id }, onOpenEvidence: noop, onOpenNode: noop, onSelectNode: noop }),
+    );
+    expect(message).toContain('message #2 (async)');
+    expect(message).toContain('add(a, b)');
+    expect(message).toContain('in loop: for each pair');
+
+    const participant = render(
+      h(Inspector, { view: sequenceView, focused: { kind: 'node', id: `L1:${l1Scope.id}/handler` }, onOpenEvidence: noop, onOpenNode: noop, onSelectNode: noop }),
+    );
+    expect(participant).toContain('>participant<');
+    // Its messages in execution order, numbered.
+    const order = ['#1', '#2', '#3', '#4'].map((n) => participant.indexOf(`${n} `));
+    expect(order.every((p) => p >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+
+  it('lists a sequence\'s messages in order in the context panel and the Markdown', () => {
+    const html = render(
+      h(ContextPanel, {
+        views: [sequenceView],
+        currentView: sequenceView,
+        basket: { nodeIds: new Set([`L1:${l1Scope.id}/handler`]), edgeIds: new Set<string>() },
+        live: snapshot,
+        onRemove: noop,
+        onClear: noop,
+        onExpand: noop,
+        onOpenEvidence: noop,
+        onFocus: noop,
+      }),
+    );
+    expect(html).toContain('L1 · Behavior');
+    expect(html).toContain('(calls, GET /add, sync)');
+    const positions = ['#1', '#2', '#3', '#4'].map((n) => html.indexOf(`${n} </span>`));
+    expect(positions.every((p) => p >= 0)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
   });
 });
 

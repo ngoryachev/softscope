@@ -207,6 +207,182 @@ pre {
   font-size: 10px;
 }
 
+/* Behaviour views (L1): the role of a state or step is a marker on the node. */
+.sz-node-initial {
+  padding-left: 22px;
+}
+
+.sz-node-initial::before {
+  content: '';
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: #2b3a4e;
+}
+
+.sz-node-final {
+  border-width: 1px;
+  box-shadow: inset 0 0 0 3px var(--panel), inset 0 0 0 4px #5b6b7f;
+}
+
+.sz-node-decision {
+  background: #fff6dc;
+  border-color: #b2893f;
+  border-radius: 18px;
+}
+
+.sz-swatch-initial {
+  border: 1px solid #5b6b7f;
+  background: #eef3fb radial-gradient(circle at 5px 50%, #2b3a4e 0 2.5px, transparent 3px);
+}
+
+.sz-swatch-final {
+  border: 1px solid #5b6b7f;
+  box-shadow: inset 0 0 0 2px #fff, inset 0 0 0 3px #5b6b7f;
+  background: #eef3fb;
+}
+
+.sz-swatch-decision {
+  border: 1px solid #b2893f;
+  background: #fff6dc;
+  border-radius: 5px;
+}
+
+.sz-swatch-async {
+  height: 0;
+  border-top: 2px solid #5b6b7f;
+  position: relative;
+}
+
+.sz-swatch-return {
+  height: 0;
+  border-top: 2px dashed #5b6b7f;
+}
+
+/* The sequence canvas: plain SVG, scrollable, same selection colours as the graph. */
+.sz-sequence {
+  overflow: auto;
+  padding: 8px;
+}
+
+.sz-seq-svg {
+  display: block;
+  font-size: 12px;
+}
+
+.sz-seq-box {
+  fill: #eef3fb;
+  stroke: #5b6b7f;
+  stroke-width: 1;
+}
+
+.sz-seq-boundary .sz-seq-box {
+  fill: #f4f5f7;
+}
+
+.sz-seq-boundary .sz-seq-title {
+  fill: var(--muted);
+}
+
+.sz-seq-title {
+  fill: #1f2a3a;
+  pointer-events: none;
+}
+
+.sz-seq-lifeline {
+  stroke: #b7c0cc;
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+}
+
+.sz-seq-participant,
+.sz-seq-message {
+  cursor: pointer;
+}
+
+.sz-seq-label {
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.sz-seq-group rect {
+  fill: rgba(47, 111, 208, 0.04);
+  stroke: #b7c0cc;
+  stroke-dasharray: 3 3;
+}
+
+.sz-seq-group-label {
+  font-size: 10px;
+  fill: var(--muted);
+  text-transform: none;
+}
+
+.sz-seq-selected .sz-seq-box {
+  fill: #dce8fb;
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.sz-seq-focused .sz-seq-box {
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+
+.sz-seq-selected .sz-seq-line {
+  stroke-width: 2.5;
+  filter: drop-shadow(0 0 2px rgba(47, 111, 208, 0.55));
+}
+
+.sz-seq-focused .sz-seq-line {
+  stroke-width: 3;
+}
+
+.sz-seq-unverified .sz-seq-label {
+  font-style: italic;
+}
+
+/* No behaviour view: the agent's reason, in place of a canvas. */
+.sz-unsupported {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.sz-unsupported-card {
+  max-width: 560px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 18px 22px;
+}
+
+.sz-unsupported-card h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.sz-unsupported-reason {
+  color: var(--warn);
+}
+
+.sz-unsupported-actions {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.sz-badge-role {
+  border-color: #c9d6ea;
+  background: #eef3fb;
+  color: #2b3a4e;
+}
+
 /* In the basket: tinted. Focused (shown in the inspector): the stronger outline. */
 .sz-node-selected {
   border-color: var(--accent);

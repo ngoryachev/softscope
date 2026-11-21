@@ -31,7 +31,15 @@ export interface ValidationIssue {
     | 'edge-dropped'
     | 'edge-unverified'
     | 'member-dropped'
-    | 'subsystem-link-dropped';
+    | 'subsystem-link-dropped'
+    /** L1 sequence: duplicate or gapped `order` values were renumbered in order of appearance. */
+    | 'sequence-order-fixed'
+    /** L1: a node `role` outside the set its diagram kind allows was cleared. */
+    | 'role-cleared'
+    /** L1: an edge `style` outside sync/async/return, or outside a sequence, was cleared. */
+    | 'style-cleared'
+    /** L1: `behavior.supported` disagrees with the reply (nodes in an unsupported reply, or nothing at all). */
+    | 'behavior-inconsistent';
   message: string;
   nodeId?: string;
   edgeId?: string;

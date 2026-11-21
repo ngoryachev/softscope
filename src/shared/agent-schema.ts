@@ -29,6 +29,9 @@ const node = z.object({
   memberOf: z.array(z.string()),
   paths: z.array(z.string()),
   hasDetail: z.boolean(),
+  // Added for L1 (behaviour views); replies cached before it exist and must still parse.
+  // The validator keeps only the roles that belong to the reply's diagram kind.
+  role: z.string().optional().default(''),
 });
 
 const edge = z.object({
@@ -39,6 +42,22 @@ const edge = z.object({
   evidence: z.array(evidence),
   confirmed: z.boolean(),
   reason: z.string(),
+  // Added for L1. `order` 0 and `style`/`group` "" mean "absent": the strict JSON Schema
+  // the SDK accepts requires every property, so the agent has no way to leave them out.
+  // Not `.int()`: a bad value is reported by validation, not a reason to reject the reply.
+  order: z.number().optional().default(0),
+  style: z.string().optional().default(''),
+  group: z.string().optional().default(''),
+});
+
+/**
+ * Whether the agent could describe the behaviour of the entity at all (L1, SPEC §5.3,
+ * R1/R5). `supported: false` comes with `diagramKind: 'unsupported'`, no nodes and a
+ * concrete `reason`; the server never fills a diagram in for it.
+ */
+const behavior = z.object({
+  supported: z.boolean(),
+  reason: z.string(),
 });
 
 export const agentGraphSchema = z.object({
@@ -46,10 +65,13 @@ export const agentGraphSchema = z.object({
   notes: z.array(z.string()),
   nodes: z.array(node),
   edges: z.array(edge),
+  // Added for L1; older cached replies default to "supported, nothing to explain".
+  behavior: behavior.optional().default({ supported: true, reason: '' }),
 });
 
 export type AgentEvidence = z.infer<typeof evidence>;
 export type AgentGraph = z.infer<typeof agentGraphSchema>;
+export type AgentBehavior = z.infer<typeof behavior>;
 
 export function parseAgentGraph(value: unknown): AgentGraph {
   return agentGraphSchema.parse(value);
@@ -88,8 +110,27 @@ export const agentGraphJsonSchema: Record<string, unknown> = strictObject({
   diagramKind: {
     type: 'string',
     description:
-      'The representation that best explains this area: component-graph, data-flow, sequence, state-machine, ... (SPEC 5.3).',
+      'The representation that best explains this area (SPEC 5.3). L4-L2: component-graph, data-flow, ... ' +
+      'L1 (behaviour of one entity): exactly one of state-machine, sequence, flow — or unsupported when ' +
+      'behavior.supported is false.',
   },
+  behavior: strictObject(
+    {
+      supported: {
+        type: 'boolean',
+        description:
+          'L1 only: true when the behaviour fits one of the supported kinds and could be derived from the code. ' +
+          'false when it fits none, or cannot be derived reliably (dynamic dispatch, runtime configuration, too ' +
+          'little code): then diagramKind is "unsupported", nodes and edges are empty, and reason says why. ' +
+          'Always true at L4-L2.',
+      },
+      reason: {
+        type: 'string',
+        description: 'When supported is false: the concrete reason, for the user. Empty otherwise.',
+      },
+    },
+    'Whether a behaviour view could be built at all. Never invent a diagram to avoid supported=false.',
+  ),
   notes: {
     type: 'array',
     description:
@@ -145,6 +186,12 @@ export const agentGraphJsonSchema: Record<string, unknown> = strictObject({
         type: 'boolean',
         description: 'true if this node has internal structure worth opening one level deeper.',
       },
+      role: {
+        type: 'string',
+        description:
+          'L1 only; "" elsewhere. state-machine: initial | final | state. sequence: participant. ' +
+          'flow: start | end | step | decision.',
+      },
     }),
   },
   edges: {
@@ -171,6 +218,22 @@ export const agentGraphJsonSchema: Record<string, unknown> = strictObject({
         type: 'string',
         description: 'When confirmed is false: why it could not be confirmed. Empty otherwise.',
       },
+      order: {
+        type: 'integer',
+        minimum: 0,
+        description:
+          'L1 sequence only: 1-based position of this message in the sequence, unique per message. 0 elsewhere.',
+      },
+      style: {
+        type: 'string',
+        description: 'L1 sequence only: sync | async | return. "" elsewhere.',
+      },
+      group: {
+        type: 'string',
+        description:
+          'L1 sequence only: the branch or loop this message belongs to, e.g. "loop: for each item" or ' +
+          '"alt: valid". Consecutive messages with the same group are drawn as one band. "" when none.',
+      },
     }),
   },
 });
@@ -180,4 +243,5 @@ export const emptyAgentGraph = (): AgentGraph => ({
   notes: [],
   nodes: [],
   edges: [],
+  behavior: { supported: true, reason: '' },
 });

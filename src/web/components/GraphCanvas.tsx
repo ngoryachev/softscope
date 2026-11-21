@@ -6,6 +6,12 @@
  *  - an `unverified` edge is dashed, muted and labelled, because the relation is not
  *    backed by evidence and must not read as a fact (SPEC §5.4).
  *
+ * A behaviour view (L1) of kind `state-machine` or `flow` is the same canvas laid out
+ * top to bottom, with the node's `role` as a marker: an initial state or start carries a
+ * dot, a final state or end a double border, a decision a diamond-ish tint; the edge
+ * label is the event, condition or branch. A `sequence` has its own canvas
+ * (`SequenceCanvas`), because lifelines are not a graph layout.
+ *
  * Selection (SPEC §6.3, FR-07): a plain click replaces this level's selection and
  * focuses the item, Shift/Ctrl/Cmd+click toggles it, a left-drag on the pane draws a
  * marquee that adds the covered nodes. Items in the basket are tinted
@@ -70,6 +76,22 @@ export interface GraphCanvasProps {
   onOpenNode: (id: string) => void;
 }
 
+/** The marker class of a behaviour role; a plain state or step has none. */
+const roleClass = (role: GraphView['nodes'][number]['role']): string => {
+  switch (role) {
+    case 'initial':
+    case 'start':
+      return 'sz-node-initial';
+    case 'final':
+    case 'end':
+      return 'sz-node-final';
+    case 'decision':
+      return 'sz-node-decision';
+    default:
+      return '';
+  }
+};
+
 const nodeClass = (view: GraphView, id: string): string => {
   const node = view.nodes.find((n) => n.id === id);
   if (!node) return 'sz-node';
@@ -78,14 +100,18 @@ const nodeClass = (view: GraphView, id: string): string => {
     node.boundary ? 'sz-node-boundary' : '',
     node.childScope ? 'sz-node-openable' : '',
     node.memberOf.length > 1 ? 'sz-node-shared' : '',
+    roleClass(node.role),
   ]
     .filter(Boolean)
     .join(' ');
 };
 
+/** A state machine and a flow read top to bottom, like the code they come from. */
+const isVertical = (view: GraphView) => view.diagramKind === 'state-machine' || view.diagramKind === 'flow';
+
 function layout(view: GraphView): { nodes: Node[]; edges: Edge[] } {
   const g = new dagre.graphlib.Graph();
-  g.setGraph({ rankdir: 'LR', nodesep: 36, ranksep: 90, marginx: 24, marginy: 24 });
+  g.setGraph({ rankdir: isVertical(view) ? 'TB' : 'LR', nodesep: 36, ranksep: isVertical(view) ? 60 : 90, marginx: 24, marginy: 24 });
   g.setDefaultEdgeLabel(() => ({}));
   for (const node of view.nodes) g.setNode(node.id, { width: NODE_WIDTH, height: NODE_HEIGHT });
   for (const edge of view.edges) {
@@ -147,6 +173,59 @@ function layout(view: GraphView): { nodes: Node[]; edges: Edge[] } {
 function Legend({ view }: { view: GraphView }) {
   const dataFlow = view.diagramKind === 'data-flow';
   const atTop = view.scope.level === 'L4';
+  if (view.diagramKind === 'state-machine') {
+    return (
+      <div className="sz-legend">
+        <span>
+          <i className="sz-swatch sz-swatch-node" /> state
+        </span>
+        <span>
+          <i className="sz-swatch sz-swatch-initial" /> initial state
+        </span>
+        <span>
+          <i className="sz-swatch sz-swatch-final" /> final state
+        </span>
+        <span>
+          <i className="sz-swatch sz-swatch-boundary" /> boundary (outside this entity)
+        </span>
+        <span>
+          <i className="sz-swatch sz-swatch-confirmed" /> arrow = transition, label = event or condition
+        </span>
+        <span>
+          <i className="sz-swatch sz-swatch-unverified" /> unverified transition
+        </span>
+        <span className="sz-legend-hint">click: select · Shift/Ctrl+click: add · drag: marquee</span>
+      </div>
+    );
+  }
+  if (view.diagramKind === 'flow') {
+    return (
+      <div className="sz-legend">
+        <span>
+          <i className="sz-swatch sz-swatch-node" /> step
+        </span>
+        <span>
+          <i className="sz-swatch sz-swatch-initial" /> start
+        </span>
+        <span>
+          <i className="sz-swatch sz-swatch-final" /> end
+        </span>
+        <span>
+          <i className="sz-swatch sz-swatch-decision" /> decision
+        </span>
+        <span>
+          <i className="sz-swatch sz-swatch-boundary" /> boundary (outside this entity)
+        </span>
+        <span>
+          <i className="sz-swatch sz-swatch-confirmed" /> arrow = next step, label = branch condition
+        </span>
+        <span>
+          <i className="sz-swatch sz-swatch-unverified" /> unverified step
+        </span>
+        <span className="sz-legend-hint">click: select · Shift/Ctrl+click: add · drag: marquee</span>
+      </div>
+    );
+  }
   return (
     <div className="sz-legend">
       <span>
