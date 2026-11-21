@@ -8,7 +8,14 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { detectChecks, detectRunner, runCheck, tailOf } from '../src/server/change/checks';
-import { createWorkspace, removeWorkspace, workspaceDiff, WorkspaceRefusedError } from '../src/server/change/workspace';
+import {
+  createWorkspace,
+  ownerFile,
+  pruneLeftoverWorkspaces,
+  removeWorkspace,
+  workspaceDiff,
+  WorkspaceRefusedError,
+} from '../src/server/change/workspace';
 import { parseUnifiedDiff } from '../src/shared/diff';
 import { cleanupTemps, copyFixture, copyFixtureAsGitRepo, gitOut, tempWorkDir } from './helpers';
 
@@ -72,6 +79,27 @@ describe('createWorkspace', () => {
     expect(gitOut(repo, ['rev-parse', 'HEAD']).trim()).toBe(head);
     expect(gitOut(repo, ['status', '--porcelain']).trim()).toBe('');
     removeWorkspace(repo, dir);
+  });
+
+  it('cleanup never touches the repository or user worktrees that happen to live under the work directory', () => {
+    const repo = copyFixtureAsGitRepo();
+    const workDir = join(repo, '..'); // the repository is a direct child of the work directory
+    const own = join(workDir, 'my-feature');
+    gitOut(repo, ['worktree', 'add', '--quiet', '--detach', own, 'HEAD']);
+    // A draft of a dead run, for contrast: linked worktree with an owner file.
+    const { dir } = createWorkspace({ repoPath: repo, id: 'dead-draft', workDir });
+    writeFileSync(ownerFile(dir), `${spawnSync(process.execPath, ['-e', '']).pid}\n`);
+
+    expect(pruneLeftoverWorkspaces(repo, workDir)).toEqual([dir]);
+    expect(existsSync(dir)).toBe(false);
+    expect(existsSync(join(repo, 'package.json'))).toBe(true);
+    expect(existsSync(join(repo, '.git'))).toBe(true);
+    expect(existsSync(join(own, 'package.json'))).toBe(true);
+    expect(gitOut(repo, ['worktree', 'list']).trim().split('\n')).toHaveLength(2);
+    // Even a direct removal request spares a main working tree.
+    removeWorkspace(repo, repo);
+    expect(existsSync(join(repo, 'package.json'))).toBe(true);
+    gitOut(repo, ['worktree', 'remove', '--force', own]);
   });
 
   it('skips an untracked nested repository instead of failing on it', () => {

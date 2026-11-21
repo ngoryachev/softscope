@@ -234,9 +234,20 @@ export function workspaceDiff(dir: string): string {
 /** `git worktree remove --force` plus prune; the directory is deleted whatever git says. */
 export function removeWorkspace(repoPath: string, dir: string): void {
   git(repoPath, ['worktree', 'remove', '--force', dir]);
-  rmSync(dir, { recursive: true, force: true });
+  // The fallback deletion is for a linked worktree git could not remove on its own. A
+  // main working tree (`.git` is a directory, not a file) is never one of ours: leave it.
+  if (isLinkedWorktreeDir(dir)) rmSync(dir, { recursive: true, force: true });
   rmSync(ownerFile(dir), { force: true });
   git(repoPath, ['worktree', 'prune']);
+}
+
+/** True for a directory that is a linked worktree (its `.git` is a file pointing at the repository). */
+function isLinkedWorktreeDir(dir: string): boolean {
+  try {
+    return lstatSync(join(dir, '.git')).isFile();
+  } catch {
+    return false;
+  }
 }
 
 /** `<workDir>/<id>.owner`: the pid of the server process that created the worktree `<workDir>/<id>`. */
@@ -294,24 +305,29 @@ export function checkPatch(repoPath: string, patch: string): PatchConflict | nul
 }
 
 /**
- * Removes the worktrees of `repoPath` that live under `workDir`, are not in `keep`, and
- * whose owning server process is gone: drafts a previous run left behind. A worktree
- * whose owner is still alive belongs to another running instance and is left alone.
+ * Removes the drafts a previous server run left behind for `repoPath`: linked worktrees
+ * that are direct children of `workDir`, carry SoftZoom's `<id>.owner` file, are not in
+ * `keep`, and whose owning server process is gone. Everything else under `workDir` —
+ * the repository itself when it happens to live there, worktrees the user made — is not
+ * SoftZoom's and is left alone, as is a draft another running instance still owns.
  * Returns the directories removed.
  */
 export function pruneLeftoverWorkspaces(repoPath: string, workDir: string, keep: Iterable<string> = []): string[] {
   const list = git(repoPath, ['worktree', 'list', '--porcelain']);
   if (!list.ok) return [];
-  const root = `${realOrSelf(workDir)}/`;
+  const realWorkDir = realOrSelf(workDir);
+  const mainTree = realOrSelf(repoPath);
   const kept = new Set([...keep].map((d) => realOrSelf(d)));
   const removed: string[] = [];
   for (const line of list.stdout.split('\n')) {
     if (!line.startsWith('worktree ')) continue;
     const dir = line.slice('worktree '.length);
     const real = realOrSelf(dir);
-    if (!real.startsWith(root) || kept.has(real)) continue;
+    if (real === mainTree || dirname(real) !== realWorkDir || kept.has(real)) continue;
     const owner = workspaceOwner(dir);
-    if (owner !== null && isProcessAlive(owner)) continue;
+    if (owner === null) continue; // not created by SoftZoom
+    if (isProcessAlive(owner)) continue; // another live instance's draft
+    if (!isLinkedWorktreeDir(dir)) continue;
     removeWorkspace(repoPath, dir);
     removed.push(dir);
   }
