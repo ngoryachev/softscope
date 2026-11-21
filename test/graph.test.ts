@@ -449,3 +449,128 @@ describe('agent reply contract', () => {
     walk(agentGraphJsonSchema);
   });
 });
+
+describe('selection context — edge cases', () => {
+  const empty = buildSelectionContext([view], { nodeIds: [], edgeIds: [] });
+
+  it('normalises reversed ranges and leaves a single range alone', () => {
+    expect(mergeRanges([{ startLine: 20, endLine: 10 }])).toEqual([{ startLine: 10, endLine: 20 }]);
+    expect(mergeRanges([{ startLine: 3, endLine: 3 }, { startLine: 1, endLine: 1 }])).toEqual([
+      { startLine: 1, endLine: 1 },
+      { startLine: 3, endLine: 3 },
+    ]);
+    expect(mergeRanges([])).toEqual([]);
+  });
+
+  it('is empty and quiet for an empty selection', () => {
+    expect(empty.nodes).toEqual([]);
+    expect(empty.files).toEqual([]);
+    expect(empty.size).toEqual({ files: 0, lines: 0 });
+    expect(empty.relations).toEqual({ internal: [], external: [] });
+    expect(empty.snapshots).toEqual([]);
+    expect(empty.warnings).toEqual([]);
+    expect(empty.stale).toBe(false);
+    expect(empty.task).toBe('');
+    expect(empty.limits.paths).toEqual([]);
+  });
+
+  it('does not duplicate nodes, relations or paths when an id is given twice or as node and edge', () => {
+    const context = buildSelectionContext([view], {
+      nodeIds: ['http', 'http', 'logging'],
+      edgeIds: ['http->logging', 'http->logging'],
+    });
+    expect(context.nodes.map((n) => n.id)).toEqual(['http', 'logging']);
+    expect(context.relations.internal.map((r) => r.id)).toEqual(['http->logging']);
+    expect(context.relations.external.map((r) => r.id).sort()).toEqual(['http->db', 'jobs->logging']);
+    expect(context.limits.paths).toEqual(['http.ts', 'logging.ts']);
+    expect(context.warnings).toEqual([]);
+  });
+
+  it('keeps the side of a selected edge whose other endpoint is gone and does not throw', () => {
+    const broken: GraphView = {
+      ...view,
+      edges: [...view.edges, edge('http', 'ghost', { id: 'http->ghost', evidence: [] })],
+    };
+    const context = buildSelectionContext([broken], { nodeIds: [], edgeIds: ['http->ghost'] });
+    expect(context.nodes.map((n) => n.id)).toEqual(['http']);
+    expect(context.relations.external.map((r) => r.id)).toContain('http->ghost');
+    expect(context.relations.external.find((r) => r.id === 'http->ghost')!.to).toEqual({ id: 'ghost', title: 'ghost' });
+  });
+
+  it('separates snapshots by branch even at the same state id, as the state comparison does', () => {
+    const l4Scope = rootScope('demo');
+    const appId = nodeId(l4Scope, 'app');
+    const l3Scope = { level: 'L3' as const, id: appId, label: 'app', paths: ['src'] };
+    const httpId = nodeId(l3Scope, 'http');
+    const l4: GraphView = {
+      scope: l4Scope,
+      diagramKind: 'component-graph',
+      nodes: [node(appId, { level: 'L4', paths: ['src'], evidence: [] })],
+      edges: [],
+      notes: [],
+      snapshot,
+    };
+    const l3: GraphView = {
+      scope: l3Scope,
+      diagramKind: 'component-graph',
+      nodes: [node(httpId, { paths: ['src/http'], evidence: [] })],
+      edges: [],
+      notes: [],
+      snapshot: { ...snapshot, branch: 'feature' },
+    };
+    const context = buildSelectionContext([l4, l3], { nodeIds: [appId, httpId], edgeIds: [] }, { live: snapshot });
+    expect(context.snapshots.map((s) => [s.branch, s.scopes.map((sc) => sc.level)])).toEqual([
+      ['main', ['L4']],
+      ['feature', ['L3']],
+    ]);
+    expect(context.warnings).toHaveLength(1);
+    expect(context.warnings[0]).toMatch(/different repository states/);
+    // Same state id as the live one on both: nothing is stale, whatever the branch name.
+    expect(context.stale).toBe(false);
+  });
+
+  it('renders an empty context without crashing and without a Task section', () => {
+    const md = renderContextMarkdown(empty);
+    expect(md).not.toContain('## Task');
+    expect(md).toContain('## Snapshots');
+    expect(md).toContain('_No items resolved._');
+    expect(md).toContain('## Files\n\n_None._');
+    expect(md).toContain('### Internal\n\n_None._');
+    expect(md).toContain('0 files, 0 lines');
+    expect(md).not.toContain('undefined');
+    expect(md.endsWith('\n')).toBe(true);
+    expect(md.endsWith('\n\n')).toBe(false);
+  });
+
+  it('renders a boundary flag, a relation label and the dirty marker', () => {
+    const live: Snapshot = { ...snapshot, dirty: true, stateId: 'dirty' };
+    const dirtyView: GraphView = { ...view, snapshot: { ...snapshot, dirty: true } };
+    const context = buildSelectionContext([dirtyView], { nodeIds: ['http', 'db'], edgeIds: [] }, { live });
+    const md = renderContextMarkdown(context);
+    expect(md).toContain('(uncommitted changes)');
+    expect(md).toContain('**db** (L3, subsystem, boundary)');
+    expect(md).toContain('http → db (imports) — unverified: connection string comes from the environment');
+    expect(md).toContain('## Snapshot\n'); // one snapshot: singular heading
+  });
+});
+
+describe('expandSelection — edge cases', () => {
+  it('reports each neighbour once, in view order, and ignores ids the view does not know', () => {
+    const fan: GraphView = {
+      ...view,
+      nodes: [node('a'), node('b'), node('c')],
+      edges: [
+        edge('a', 'c', { id: 'a->c:imports', evidence: [] }),
+        edge('a', 'c', { id: 'a->c:calls', kind: 'calls', evidence: [] }),
+        edge('b', 'c', { id: 'b->c', evidence: [] }),
+        edge('c', 'a', { id: 'c->a', evidence: [] }),
+      ],
+    };
+    expect(expandSelection(fan, ['c'], 'in')).toEqual(['a', 'b']);
+    expect(expandSelection(fan, ['c'], 'out')).toEqual(['a']);
+    expect(expandSelection(fan, ['c'], 'both')).toEqual(['a', 'b']);
+    expect(expandSelection(fan, ['nope'], 'both')).toEqual([]);
+    expect(expandSelection(fan, [], 'both')).toEqual([]);
+    expect(expandSelection(fan, new Set(['a', 'b', 'c']), 'both')).toEqual([]);
+  });
+});

@@ -14,9 +14,13 @@
  *
  * React Flow only applies a marquee to nodes it owns, so the canvas keeps the laid-out
  * nodes and edges in local state, re-seeded when the view changes, and mirrors the
- * basket into their `selected` flags one way. The marquee reports through
- * `onSelectionChange`; it only ever adds, so React Flow's own deselects (a pane click,
- * the start of a new rectangle) do not empty the basket behind the user's back.
+ * basket into their `selected` flags one way. The marquee is read from the `select`
+ * changes React Flow dispatches between `onSelectionStart` and `onSelectionEnd`, and only
+ * ever adds: React Flow's own deselects (a pane click, the start of a new rectangle) do
+ * not empty the basket behind the user's back. `onSelectionChange` is deliberately not
+ * used — it also reports the selection a click produces, and a click has its own
+ * semantics (replace or toggle), so that path would re-add a node the user just
+ * Shift+clicked out of the basket.
  */
 import { useEffect, useMemo, useRef } from 'react';
 import dagre from '@dagrejs/dagre';
@@ -32,7 +36,7 @@ import {
   type EdgeMouseHandler,
   type Node,
   type NodeMouseHandler,
-  type OnSelectionChangeFunc,
+  type OnNodesChange,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import type { GraphView } from '../../shared/graph';
@@ -182,6 +186,8 @@ export function GraphCanvas({ view, basket, focused, onSelect, onMarquee, onClea
   // node the user dragged would jump back to its laid-out position.
   const basketRef = useRef(basket);
   basketRef.current = basket;
+  /** A selection rectangle is being drawn: `select` changes arriving now are the marquee. */
+  const marquee = useRef(false);
 
   useEffect(() => {
     const b = basketRef.current;
@@ -233,16 +239,29 @@ export function GraphCanvas({ view, basket, focused, onSelect, onMarquee, onClea
     };
   });
 
+  // A click of any kind means no rectangle is being drawn: a pointer cancel (touch, a
+  // window losing focus) ends a marquee without `onSelectionEnd`, so the flag is also
+  // cleared here rather than left on until the next rectangle.
   const handleNodeClick: NodeMouseHandler = (event, node) => {
+    marquee.current = false;
     onSelect({ kind: 'node', id: node.id }, { toggle: isToggle(event) });
   };
   const handleEdgeClick: EdgeMouseHandler = (event, edge) => {
+    marquee.current = false;
     onSelect({ kind: 'edge', id: edge.id }, { toggle: isToggle(event) });
   };
-  // Nodes only: the rectangle also selects the edges between covered nodes, which is not
-  // what the user drew. Relations enter the basket by click.
-  const handleSelectionChange: OnSelectionChangeFunc = ({ nodes: selectedNodes }) => {
-    const ids = selectedNodes.map((n) => n.id).filter((id) => !basket.nodeIds.has(id));
+  const handlePaneClick = () => {
+    marquee.current = false;
+    onClearFocus();
+  };
+  // React Flow dispatches the rectangle's `select` changes synchronously while the pointer
+  // moves, so every one of them arrives while `marquee` is set. Nodes only: the rectangle
+  // also selects the edges between covered nodes, which is not what the user drew —
+  // relations enter the basket by click. Deselects are ignored: the basket only grows here.
+  const handleNodesChange: OnNodesChange<Node> = (changes) => {
+    onNodesChange(changes);
+    if (!marquee.current) return;
+    const ids = changes.flatMap((c) => (c.type === 'select' && c.selected && !basket.nodeIds.has(c.id) ? [c.id] : []));
     if (ids.length > 0) onMarquee(ids);
   };
 
@@ -251,13 +270,18 @@ export function GraphCanvas({ view, basket, focused, onSelect, onMarquee, onClea
       <ReactFlow
         nodes={decorated}
         edges={decoratedEdges}
-        onNodesChange={onNodesChange}
+        onNodesChange={handleNodesChange}
         onEdgesChange={onEdgesChange}
         onNodeClick={handleNodeClick}
         onNodeDoubleClick={(_event, node) => onOpenNode(node.id)}
         onEdgeClick={handleEdgeClick}
-        onPaneClick={onClearFocus}
-        onSelectionChange={handleSelectionChange}
+        onPaneClick={handlePaneClick}
+        onSelectionStart={() => {
+          marquee.current = true;
+        }}
+        onSelectionEnd={() => {
+          marquee.current = false;
+        }}
         selectionOnDrag
         selectionMode={SelectionMode.Partial}
         selectNodesOnDrag={false}

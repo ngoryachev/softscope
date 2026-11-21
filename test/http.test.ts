@@ -521,3 +521,119 @@ describe('progress activity paths', () => {
     expect(describeToolInput('Glob', { pattern: `${repo}/**/*.ts` }, repo)).toBe(`${repo}/**/*.ts`);
   });
 });
+
+describe('/api/context — more', () => {
+  const FS_ID = 'L4:root/fs';
+  const APP_FS_EDGE = `L4:root|${APP_ID}->${FS_ID}|reads`;
+  const postContext = (app: ReturnType<typeof build>, body: unknown, extra = '') =>
+    app.request(`/api/context${extra}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: typeof body === 'string' ? body : JSON.stringify(body),
+    });
+
+  it('a selected relation pulls in both endpoints and is internal; a boundary node falls back to its evidence file', async () => {
+    const app = build();
+    await app.request('/api/graph?level=L4&scope=root');
+
+    const body = (await (await postContext(app, { nodeIds: [], edgeIds: [APP_FS_EDGE] })).json()) as ContextResponse;
+    expect(body.nodes.map((n) => n.id)).toEqual([APP_ID, FS_ID]);
+    expect(body.nodes[1]).toMatchObject({ boundary: true, scope: { id: 'root', label: 'sample-app' } });
+    expect(body.relations.internal.map((r) => [r.id, r.status])).toEqual([[APP_FS_EDGE, 'unverified']]);
+    expect(body.relations.external).toEqual([]);
+    // 1-5 of the app and 2-2 of the boundary node merge into one range.
+    expect(body.files).toEqual([{ file: 'src/index.ts', ranges: [{ startLine: 1, endLine: 5 }] }]);
+    expect(body.size).toEqual({ files: 1, lines: 5 });
+    expect(body.limits.paths).toEqual(['src', 'src/index.ts']);
+    expect(body.task).toBe('');
+    expect(body.warnings).toEqual([]);
+  });
+
+  it('includes views served from the cache by a fresh session', async () => {
+    const cache = tempCache();
+    const first = new FakeSchemaAgent({ replies: { 'L4:root': l4Reply }, strict: true });
+    const warm = createApp({ agent: first, cache, session: new RepoSession(repo, { agent: first, cache }) }).app;
+    expect((await warm.request('/api/graph?level=L4&scope=root')).status).toBe(200);
+    expect(first.calls).toHaveLength(1);
+
+    const second = new FakeSchemaAgent({ replies: { 'L4:root': l4Reply }, strict: true });
+    const cold = createApp({ agent: second, cache, session: new RepoSession(repo, { agent: second, cache }) }).app;
+    // Nothing loaded yet in this session: the id is a warning, not a generation.
+    const before = (await (await postContext(cold, { nodeIds: [APP_ID], edgeIds: [] })).json()) as ContextResponse;
+    expect(before.nodes).toEqual([]);
+    expect(before.warnings).toEqual([expect.stringContaining('view L4:root, which is not loaded')]);
+    expect(second.calls).toHaveLength(0);
+
+    const graph = (await (await cold.request('/api/graph?level=L4&scope=root')).json()) as GraphResponse;
+    expect(graph.cached).toBe(true);
+    expect(second.calls).toHaveLength(0);
+    const after = (await (await postContext(cold, { nodeIds: [APP_ID], edgeIds: [] })).json()) as ContextResponse;
+    expect(after.nodes.map((n) => n.id)).toEqual([APP_ID]);
+    expect(after.warnings).toEqual([]);
+    expect(second.calls).toHaveLength(0);
+  });
+
+  it('resolves an L2 id once that view was loaded and lists every scope under the snapshot', async () => {
+    const app = build();
+    await app.request('/api/graph?level=L4&scope=root');
+    await app.request(`/api/graph?level=L3&scope=${encodeURIComponent(APP_ID)}`);
+    await app.request(`/api/graph?level=L2&scope=${encodeURIComponent(LOGGING_ID)}`);
+    const logId = `L2:${LOGGING_ID}/log`;
+
+    const body = (await (await postContext(app, { nodeIds: [APP_ID, LOGGING_ID, logId], edgeIds: [] })).json()) as ContextResponse;
+    expect(body.nodes.map((n) => n.level)).toEqual(['L4', 'L3', 'L2']);
+    expect(body.warnings).toEqual([]);
+    expect(body.snapshots).toHaveLength(1);
+    expect(body.snapshots[0]!.scopes.map((s) => s.level)).toEqual(['L4', 'L3', 'L2']);
+    // The L3 node (src/util/log.ts 1-3) and the L2 function (same lines) collapse into one range.
+    expect(body.files).toEqual([
+      { file: 'src/index.ts', ranges: [{ startLine: 1, endLine: 5 }] },
+      { file: 'src/util/log.ts', ranges: [{ startLine: 1, endLine: 3 }] },
+    ]);
+    expect(body.limits.paths).toEqual(['src', 'src/util', 'src/util/log.ts']);
+  });
+
+  it('keeps the error shape for a malformed body whatever the format, and ignores unknown formats', async () => {
+    const app = build();
+    await app.request('/api/graph?level=L4&scope=root');
+
+    const bad = await postContext(app, { nodeIds: 'x', edgeIds: [] }, '?format=markdown');
+    expect(bad.status).toBe(400);
+    expect(bad.headers.get('content-type')).toContain('application/json');
+    expect(((await bad.json()) as { error: string }).error).toMatch(/nodeIds/);
+
+    const json = await postContext(app, { nodeIds: [APP_ID], edgeIds: [] }, '?format=json');
+    expect(json.status).toBe(200);
+    expect(json.headers.get('content-type')).toContain('application/json');
+
+    const empty = await postContext(app, { nodeIds: [], edgeIds: [] }, '?format=markdown');
+    expect(empty.status).toBe(200);
+    expect(await empty.text()).toContain('_No items resolved._');
+
+    // Extra keys are tolerated, a null task is not.
+    expect((await postContext(app, { nodeIds: [], edgeIds: [], extra: 1 })).status).toBe(200);
+    expect((await postContext(app, { nodeIds: [], edgeIds: [], task: null })).status).toBe(400);
+    expect((await postContext(app, [])).status).toBe(400);
+    expect((await postContext(app, 'null')).status).toBe(400);
+  });
+
+  it('a regenerated view replaces the old one in the context', async () => {
+    const app = build();
+    await app.request('/api/graph?level=L4&scope=root');
+    appendFileSync(join(repo, 'src/util/log.ts'), '\nexport const extra = 3;\n');
+    const stale = (await (await postContext(app, { nodeIds: [APP_ID], edgeIds: [] })).json()) as ContextResponse;
+    expect(stale.stale).toBe(true);
+
+    // A plain request keeps serving the generated view, flagged stale; Regenerate replaces it.
+    const kept = (await (await app.request('/api/graph?level=L4&scope=root')).json()) as GraphResponse;
+    expect(kept.stale).toBe(true);
+    expect((await (await postContext(app, { nodeIds: [APP_ID], edgeIds: [] })).json() as ContextResponse).stale).toBe(true);
+    const fresh = (await (await app.request('/api/graph?level=L4&scope=root&refresh=1')).json()) as GraphResponse;
+    expect(fresh.view.snapshot.dirty).toBe(true);
+    const after = (await (await postContext(app, { nodeIds: [APP_ID], edgeIds: [] })).json()) as ContextResponse;
+    expect(after.stale).toBe(false);
+    expect(after.warnings).toEqual([]);
+    expect(after.snapshots).toHaveLength(1);
+    expect(after.snapshots[0]!.dirty).toBe(true);
+  });
+});

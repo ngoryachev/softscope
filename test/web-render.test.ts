@@ -413,3 +413,85 @@ describe('context panel', () => {
     expect(html).not.toContain('Copy as Markdown');
   });
 });
+
+describe('context panel — more', () => {
+  const panel = (
+    basket: { nodeIds: Set<string>; edgeIds: Set<string> },
+    over: { currentView?: GraphView | null; views?: GraphView[]; live?: Snapshot | null } = {},
+  ) =>
+    render(
+      h(ContextPanel, {
+        views: over.views ?? [view, l3View, l2View],
+        currentView: over.currentView === undefined ? l3View : over.currentView,
+        basket,
+        live: over.live === undefined ? snapshot : over.live,
+        onRemove: noop,
+        onClear: noop,
+        onExpand: noop,
+        onOpenEvidence: noop,
+        onFocus: noop,
+      }),
+    );
+  const expandButton = (html: string) => /<button[^>]*>Expand<\/button>/.exec(html)?.[0] ?? '';
+  const clearButton = (html: string) => /<button[^>]*>Clear<\/button>/.exec(html)?.[0] ?? '';
+
+  it('disables Expand unless a basket node is in the current view, and Clear when empty', () => {
+    expect(clearButton(panel(emptyBasket))).toContain('disabled');
+    expect(expandButton(panel(emptyBasket))).toContain('disabled');
+
+    const l4Only = { nodeIds: new Set(['srv']), edgeIds: new Set<string>() };
+    expect(clearButton(panel(l4Only))).not.toContain('disabled');
+    expect(expandButton(panel(l4Only, { currentView: l3View }))).toContain('disabled');
+    expect(expandButton(panel(l4Only, { currentView: view }))).not.toContain('disabled');
+    expect(expandButton(panel(l4Only, { currentView: null }))).toContain('disabled');
+    // A relation alone does not expand: only nodes have neighbours.
+    const edgeOnly = { nodeIds: new Set<string>(), edgeIds: new Set(['srv-db']) };
+    expect(expandButton(panel(edgeOnly, { currentView: view }))).toContain('disabled');
+  });
+
+  it('shows a confirmed internal relation, its label, merged files and fallback change limits', () => {
+    const html = panel({ nodeIds: new Set<string>(), edgeIds: new Set(['handler-add']) }, { currentView: l2View });
+    expect(html).toContain('1 item');
+    expect(html).toContain('L2 · Entities');
+    expect(html).toContain('>calls<'); // the relation's title in the basket is its kind
+    expect(html).toContain('handleRequest → add');
+    expect(html).toContain('Internal relations');
+    expect(html).toContain('sz-badge-ok');
+    expect(html).toContain('>confirmed<');
+    expect(html).toContain('(calls, two parsed numbers)');
+    expect(html).not.toContain('sz-badge-warn');
+    expect(html).toContain('2 files');
+    expect(html).toContain('6 lines');
+    expect(html).toContain('src/http.ts:1-3'); // 1-3 of the node plus 2-2 of the edge, merged
+    expect(html).toContain('src/math.ts:1-3');
+    expect(html).toContain('<code>src/http.ts</code>');
+    expect(html).toContain('<code>src/math.ts</code>'); // `add` has no paths: its evidence file stands in
+    expect(html).not.toContain('sz-warn'); // same snapshot as live, everything resolved
+    // The relation's endpoints are in the context but not in the basket: nothing to expand from.
+    expect(expandButton(html)).toContain('disabled');
+  });
+
+  it('marks an item that is gone from its loaded view and warns about mixed snapshots', () => {
+    const moved: GraphView = { ...l3View, snapshot: { ...snapshot, shortCommit: 'bbbbbbbb', stateId: 'other' } };
+    const html = panel(
+      { nodeIds: new Set(['srv', 'L3:L4:root/server/gone', 'L3:L4:root/server/http']), edgeIds: new Set<string>() },
+      { views: [view, moved], live: null },
+    );
+    expect(html).toContain('no longer in this view');
+    expect(html).toContain('sz-basket-unresolved');
+    expect(html).toContain('no longer exists in view L3:L4:root/server');
+    expect(html).toContain('different repository states');
+    // No live snapshot was given: nothing can be called stale.
+    expect(html).not.toContain('the repository is now at');
+  });
+
+  it('renders without a live snapshot and without any loaded view', () => {
+    const html = panel({ nodeIds: new Set(['L4:root/x']), edgeIds: new Set<string>() }, { views: [], currentView: null, live: null });
+    expect(html).toContain('1 item');
+    expect(html).toContain('not loaded');
+    expect(html).toContain('which is not loaded');
+    expect(html).toContain('L4 · Applications');
+    expect(html).toContain('0 files');
+    expect(html).toContain('Copy as JSON');
+  });
+});
