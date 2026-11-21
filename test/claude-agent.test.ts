@@ -6,14 +6,23 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { join } from 'node:path';
 import { ClaudeSchemaAgent, describeToolInput, repoRelative } from '../src/server/agent/claude';
-import { AgentError, type AgentActivity, type GenerateRequest } from '../src/server/agent/types';
+import { bashRulesFor, ClaudeChangeAgent } from '../src/server/agent/claude-change';
+import { AgentError, type AgentActivity, type ChangeRunRequest, type GenerateRequest } from '../src/server/agent/types';
 import { buildIndex } from '../src/server/indexer/index';
-import { rootScope } from '../src/shared/graph';
+import { buildSelectionContext, rootScope } from '../src/shared/graph';
 import { agentGraph, cleanupTemps, copyFixture } from './helpers';
 
 interface QueryCall {
   prompt: string;
-  options: { abortController: AbortController };
+  options: {
+    abortController: AbortController;
+    cwd?: string;
+    tools?: string[];
+    allowedTools?: string[];
+    permissionMode?: string;
+    settingSources?: string[];
+    outputFormat?: { type: string; schema: Record<string, unknown> };
+  };
 }
 
 const calls: QueryCall[] = [];
@@ -179,5 +188,100 @@ describe('repoRelative', () => {
     // Without a known detail the raw input is shown, as before.
     expect(describeToolInput('Read', {}, repo)).toBe('{}');
     expect(describeToolInput('Read', null, repo)).toBe('{}');
+  });
+});
+
+describe('ClaudeChangeAgent', () => {
+  const changeRequest = (): ChangeRunRequest => ({
+    workspaceDir: repo,
+    context: buildSelectionContext([], { nodeIds: [], edgeIds: [], task: 'rename log to logLine' }),
+    task: 'rename log to logLine',
+    checks: [
+      { name: 'typecheck', command: 'npm run typecheck', argv: ['npm', 'run', 'typecheck'] },
+      { name: 'test', command: 'npm run test', argv: ['npm', 'run', 'test'] },
+    ],
+  });
+  const report = {
+    summary: 'Renamed the function.',
+    changedFiles: ['src/util/log.ts'],
+    checks: [{ command: 'npm run typecheck', ok: true, note: '' }],
+    scopeExpansion: null,
+  };
+
+  it('runs in the worktree with edit tools and Bash limited to the check commands, and parses the report', async () => {
+    script = async function* () {
+      yield {
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', name: 'Edit', input: { file_path: join(repo, 'src/util/log.ts') } },
+            { type: 'tool_use', name: 'Bash', input: { command: 'npm run typecheck' } },
+          ],
+        },
+      };
+      yield { type: 'result', subtype: 'success', structured_output: report, result: '' };
+    };
+    const seen: AgentActivity[] = [];
+    const agent = new ClaudeChangeAgent();
+
+    const result = await agent.run({ ...changeRequest(), onProgress: (e) => seen.push(e) });
+
+    expect(result).toEqual(report);
+    expect(seen).toEqual([
+      { tool: 'Edit', detail: 'src/util/log.ts' },
+      { tool: 'Bash', detail: 'npm run typecheck' },
+    ]);
+    const options = calls[0]!.options;
+    expect(options.cwd).toBe(repo);
+    expect(options.permissionMode).toBe('dontAsk');
+    expect(options.settingSources).toEqual([]);
+    expect(options.tools).toEqual(['Read', 'Grep', 'Glob', 'Edit', 'Write', 'MultiEdit', 'Bash']);
+    expect(options.allowedTools).toEqual([
+      'Read',
+      'Grep',
+      'Glob',
+      'Edit',
+      'Write',
+      'MultiEdit',
+      'Bash(npm run typecheck)',
+      'Bash(npm run typecheck:*)',
+      'Bash(npm run test)',
+      'Bash(npm run test:*)',
+    ]);
+    expect(options.outputFormat?.type).toBe('json_schema');
+    expect(calls[0]!.prompt).toContain('rename log to logLine');
+    expect(calls[0]!.prompt).toContain('npm run typecheck');
+    expect(calls[0]!.prompt).toContain('# Instruction');
+  });
+
+  it('offers no Bash at all when there are no checks, and tells the agent about the previous run', async () => {
+    script = async function* () {
+      yield { type: 'result', subtype: 'success', structured_output: report, result: '' };
+    };
+    const agent = new ClaudeChangeAgent();
+    await agent.run({ ...changeRequest(), checks: [], previous: { ...report, summary: 'Earlier: renamed half of it.' } });
+    expect(calls[0]!.options.tools).toEqual(['Read', 'Grep', 'Glob', 'Edit', 'Write', 'MultiEdit']);
+    expect(calls[0]!.options.allowedTools).not.toContain('Bash');
+    expect(calls[0]!.prompt).toContain('# Previous run');
+    expect(calls[0]!.prompt).toContain('Earlier: renamed half of it.');
+    expect(bashRulesFor([])).toEqual([]);
+  });
+
+  it('turns a non-matching report and a non-success result into AgentErrors', async () => {
+    script = async function* () {
+      yield { type: 'result', subtype: 'success', structured_output: { summary: 1 }, result: '' };
+    };
+    await expect(new ClaudeChangeAgent().run(changeRequest())).rejects.toBeInstanceOf(AgentError);
+    script = async function* () {
+      yield { type: 'result', subtype: 'error_during_execution', result: '' };
+    };
+    await expect(new ClaudeChangeAgent().run(changeRequest())).rejects.toThrow(/stopped/);
+  });
+
+  it('falls back to a JSON object in the text reply', async () => {
+    script = async function* () {
+      yield { type: 'result', subtype: 'success', result: `Done.\n\`\`\`json\n${JSON.stringify(report)}\n\`\`\`` };
+    };
+    expect(await new ClaudeChangeAgent().run(changeRequest())).toEqual(report);
   });
 });

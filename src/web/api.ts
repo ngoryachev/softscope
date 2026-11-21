@@ -1,13 +1,20 @@
 /** Typed wrappers over the local HTTP API. */
 import type {
   ApiError,
+  ApplyRequest,
+  ApplyResponse,
   CancelRequest,
+  ChangeProgressEvent,
+  ChangeRequest,
+  ChangeStartResponse,
+  ChangeStatus,
   ContextRequest,
   ContextResponse,
   FileResponse,
   GraphResponse,
   OpenRepoRequest,
   ProgressEvent,
+  RefineRequest,
   RepoState,
 } from '../shared/api';
 import type { Level, Snapshot } from '../shared/graph';
@@ -57,24 +64,19 @@ export const cancelGeneration = (level: Level, scopeId: string) => {
 };
 
 /**
- * Follows the progress of a running generation over SSE. The server ends the stream
- * after the terminal event, or after a single `idle` event when nothing is running —
- * the caller decides whether to try again. `onDrop` fires when the connection ended
- * before any such event arrived (a network hiccup), so the caller can reconnect.
- * Returns a function that closes the stream.
+ * Follows a job's progress stream over SSE. The server ends the stream after the
+ * terminal event, or after a single `idle` event when nothing is running — the caller
+ * decides whether to try again. `onDrop` fires when the connection ended before any such
+ * event arrived (a network hiccup), so the caller can reconnect. Returns a function that
+ * closes the stream.
  */
-export function subscribeProgress(
-  level: Level,
-  scopeId: string,
-  onEvent: (event: ProgressEvent) => void,
-  onDrop?: () => void,
-): () => void {
-  const source = new EventSource(`/api/graph/progress?${graphQuery(level, scopeId)}`);
+function subscribeStream<E extends { type: string }>(url: string, onEvent: (event: E) => void, onDrop?: () => void): () => void {
+  const source = new EventSource(url);
   let ended = false;
   const handle = (message: MessageEvent<string>) => {
-    let event: ProgressEvent;
+    let event: E;
     try {
-      event = JSON.parse(message.data) as ProgressEvent;
+      event = JSON.parse(message.data) as E;
     } catch {
       return;
     }
@@ -100,6 +102,10 @@ export function subscribeProgress(
   };
 }
 
+/** The progress of a running generation (see `subscribeStream`). */
+export const subscribeProgress = (level: Level, scopeId: string, onEvent: (event: ProgressEvent) => void, onDrop?: () => void) =>
+  subscribeStream<ProgressEvent>(`/api/graph/progress?${graphQuery(level, scopeId)}`, onEvent, onDrop);
+
 export const getFile = (path: string) => json<FileResponse>(`/api/file?path=${encodeURIComponent(path)}`);
 
 /** The structured context of a selection, as the server computes it from its loaded views. */
@@ -118,3 +124,29 @@ export async function getContextMarkdown(req: ContextRequest): Promise<string> {
   }
   return res.text();
 }
+
+/* ---- Prompt → Change → Verify ------------------------------------------------------ */
+
+const changeUrl = (id: string, tail = '') => `/api/change/${encodeURIComponent(id)}${tail}`;
+
+export const startChange = (req: ChangeRequest) => post<ChangeStartResponse>('/api/change', req);
+
+export const getChange = (id: string) => json<ChangeStatus>(changeUrl(id));
+
+/** The progress of the change's running agent (see `subscribeStream`). */
+export const subscribeChangeProgress = (id: string, onEvent: (event: ChangeProgressEvent) => void, onDrop?: () => void) =>
+  subscribeStream<ChangeProgressEvent>(changeUrl(id, '/progress'), onEvent, onDrop);
+
+export const cancelChange = (id: string) => post<{ cancelled: boolean }>(changeUrl(id, '/cancel'), {});
+
+export const refineChange = (id: string, task: string) => {
+  const body: RefineRequest = { task };
+  return post<ChangeStatus>(changeUrl(id, '/refine'), body);
+};
+
+export const applyChange = (id: string, confirmOutside = false) => {
+  const body: ApplyRequest = confirmOutside ? { confirmOutside } : {};
+  return post<ApplyResponse>(changeUrl(id, '/apply'), body);
+};
+
+export const discardChange = (id: string) => post<ChangeStatus>(changeUrl(id, '/discard'), {});

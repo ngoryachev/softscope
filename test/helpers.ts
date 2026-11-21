@@ -66,6 +66,34 @@ export function tempCache(): FileCache {
   return new FileCache(temp('cache'));
 }
 
+/** A parent directory for change worktrees, outside every fixture copy. */
+export function tempWorkDir(): string {
+  return temp('work');
+}
+
+/** `git <args>` in `cwd`; stdout, or a thrown error. */
+export function gitOut(cwd: string, args: string[]): string {
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr}`);
+  return r.stdout;
+}
+
+/** Polls `condition` until it holds; the agent is reached only after a few awaited ticks. */
+export async function waitFor(condition: () => boolean, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error('waitFor: condition not met in time');
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+/** The JSON payloads of an SSE body. */
+export const sseEvents = (body: string) =>
+  body
+    .split('\n')
+    .filter((line) => line.startsWith('data: '))
+    .map((line) => JSON.parse(line.slice('data: '.length)) as { type: string; [k: string]: unknown });
+
 export interface NodeSpec {
   slug: string;
   title?: string;

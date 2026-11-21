@@ -9,9 +9,15 @@
  * Selection is a basket that survives navigation between levels of one repository:
  * a plain click replaces this level's part of it, Shift/Ctrl/Cmd+click toggles, a
  * marquee adds. The ContextPanel turns the basket into the structured AI context.
+ *
+ * Prompt → Change → Verify (SPEC §6.4, §6.5): an instruction over the basket starts a
+ * change on the server; the ChangePanel follows it, shows the diff, the affected
+ * components and the checks, and applies or discards it. After Apply the open view is
+ * regenerated when it is affected, and the other affected views get an Update button —
+ * a stale schema is never presented as current (SPEC §9.4, FR-11).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { GraphResponse, ProgressEvent, RepoState, ValidationIssue } from '../shared/api';
+import type { ChangeProgressEvent, ChangeStatus, GraphResponse, ProgressEvent, RepoState, ValidationIssue } from '../shared/api';
 import {
   expandSelection,
   findNode,
@@ -28,8 +34,24 @@ import {
   type ScopeRef,
   type Snapshot,
 } from '../shared/graph';
-import { cancelGeneration, GenerationCancelled, getGraph, getSnapshot, getState, openRepo, subscribeProgress } from './api';
+import {
+  applyChange,
+  cancelChange,
+  cancelGeneration,
+  discardChange,
+  GenerationCancelled,
+  getChange,
+  getGraph,
+  getSnapshot,
+  getState,
+  openRepo,
+  refineChange,
+  startChange,
+  subscribeChangeProgress,
+  subscribeProgress,
+} from './api';
 import { Breadcrumbs } from './components/Breadcrumbs';
+import { ChangePanel } from './components/ChangePanel';
 import { FileViewer } from './components/FileViewer';
 import { GenerationProgress, type ProgressActivity } from './components/GenerationProgress';
 import { ContextPanel, ownerView } from './components/ContextPanel';
@@ -41,6 +63,8 @@ import { SnapshotBar } from './components/SnapshotBar';
 const SNAPSHOT_POLL_MS = 5000;
 /** How often to look again for the job when the server says nothing is running yet. */
 const PROGRESS_RETRY_MS = 1000;
+/** How often the status of a running change is re-read, next to its progress stream. */
+const CHANGE_POLL_MS = 2000;
 const KEPT_ACTIVITY = 40;
 
 interface StackEntry {
@@ -66,6 +90,12 @@ interface LoadOptions {
 }
 
 const depthOf = (level: Level) => LEVELS.indexOf(level);
+
+const sameScope = (a: ScopeRef, b: ScopeRef) => a.level === b.level && a.id === b.id;
+
+/** The change still has a worktree: it is neither applied nor discarded. */
+const isOpenChange = (change: ChangeStatus | null): boolean =>
+  change !== null && change.status !== 'applied' && change.status !== 'discarded';
 
 const EMPTY_BASKET: Basket = { nodeIds: new Set(), edgeIds: new Set() };
 
@@ -95,6 +125,14 @@ export function App() {
   // A stable array, so an unrelated re-render does not hand the ContextPanel a new `views`.
   const loadedViews = useMemo(() => [...views.values()], [views]);
   const [viewing, setViewing] = useState<Evidence | null>(null);
+  /** The change being made or reviewed (SPEC §6.4, §6.5); replaces the context panel while set. */
+  const [change, setChange] = useState<ChangeStatus | null>(null);
+  const [changeActivity, setChangeActivity] = useState<ProgressActivity[]>([]);
+  const [changeRunStartedAt, setChangeRunStartedAt] = useState<string | null>(null);
+  const [changeBusy, setChangeBusy] = useState(false);
+  const [changeError, setChangeError] = useState<string | null>(null);
+  /** Loaded views that describe code an applied change touched and were not regenerated yet (FR-11). */
+  const [pendingUpdates, setPendingUpdates] = useState<ScopeRef[]>([]);
   const requestId = useRef(0);
   const basketRef = useRef(basket);
   basketRef.current = basket;
@@ -169,10 +207,23 @@ export function App() {
     addNodes(expandSelection(currentView, inView, direction));
   };
 
+  /** The change the server still holds open (a reload, another tab): show it instead of starting blind. */
+  const pickUpOpenChange = (activeChangeId: string | null) => {
+    if (!activeChangeId) return;
+    getChange(activeChangeId)
+      .then(setChange)
+      .catch(() => undefined);
+  };
+
   useEffect(() => {
     getState()
-      .then(setState)
+      .then((s) => {
+        setState(s);
+        pickUpOpenChange(s.activeChangeId);
+      })
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+    // Runs once, on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /** Loads one scope. Any in-flight load for an older request is discarded. */
@@ -200,6 +251,8 @@ export function App() {
         return index >= 0 ? [...prev.slice(0, index), entry] : [...prev, entry];
       });
       setViews((prev) => new Map(prev).set(viewKey(next.view.scope.level, next.view.scope.id), next.view));
+      // A regenerated view is current again: it leaves the list of schemas to update.
+      if (options.refresh) setPendingUpdates((prev) => prev.filter((s) => !sameScope(s, next.view.scope)));
       if (options.selectNodeId && findNode(next.view, options.selectNodeId)) {
         selectReplace({ kind: 'node', id: options.selectNodeId }, next.view);
       } else if (options.focus && hasItem(next.view, options.focus)) {
@@ -288,16 +341,165 @@ export function App() {
     };
   }, [loadingLevel, loadingScopeId]);
 
+  /* Prompt → Change → Verify. */
+
+  // While the change runs, follow its progress stream and re-read its status: the stream
+  // says what the agent does, the status carries the result once it is through.
+  const changeId = change?.id ?? null;
+  const changeRunning = change?.status === 'running';
+  useEffect(() => {
+    if (!changeId || !changeRunning) return;
+    let closed = false;
+    let close: (() => void) | null = null;
+    let retry: number | null = null;
+    const refresh = () => {
+      getChange(changeId)
+        .then((status) => {
+          if (!closed) setChange(status);
+        })
+        .catch((err: unknown) => {
+          if (!closed) setChangeError(err instanceof Error ? err.message : String(err));
+        });
+    };
+    const onEvent = (event: ChangeProgressEvent) => {
+      if (closed) return;
+      if (event.type === 'started') setChangeRunStartedAt(event.startedAt);
+      else if (event.type === 'activity') {
+        const entry: ProgressActivity = { tool: event.tool, detail: event.detail, at: event.at };
+        setChangeActivity((prev) => [...prev, entry].slice(-KEPT_ACTIVITY));
+      } else if (event.type === 'idle') {
+        // The run is over but the status was not re-read yet, or has not started: ask again.
+        refresh();
+        retry = window.setTimeout(connect, PROGRESS_RETRY_MS);
+      } else {
+        refresh();
+      }
+    };
+    const onDrop = () => {
+      if (!closed) retry = window.setTimeout(connect, PROGRESS_RETRY_MS);
+    };
+    const connect = () => {
+      if (closed) return;
+      setChangeActivity([]);
+      close = subscribeChangeProgress(changeId, onEvent, onDrop);
+    };
+    connect();
+    const poll = window.setInterval(refresh, CHANGE_POLL_MS);
+    return () => {
+      closed = true;
+      if (retry !== null) window.clearTimeout(retry);
+      window.clearInterval(poll);
+      close?.();
+    };
+  }, [changeId, changeRunning]);
+
+  const changeFailure = (err: unknown) => {
+    setChangeBusy(false);
+    setChangeError(err instanceof Error ? err.message : String(err));
+  };
+
+  /** Run: the basket plus the instruction become a change on the server (SPEC §6.4). */
+  const handleRun = (task: string) => {
+    setChangeError(null);
+    setError(null);
+    setChangeBusy(true);
+    setChangeActivity([]);
+    setChangeRunStartedAt(null);
+    startChange({ nodeIds: [...basket.nodeIds], edgeIds: [...basket.edgeIds], task })
+      .then(({ id }) => getChange(id))
+      .then((status) => {
+        setChange(status);
+        setChangeBusy(false);
+      })
+      .catch((err: unknown) => {
+        // No change exists: the context panel stays and the error is shown as a banner.
+        setChangeBusy(false);
+        setError(err instanceof Error ? err.message : String(err));
+      });
+  };
+
+  const handleChangeCancel = () => {
+    if (!change) return;
+    setChangeBusy(true);
+    cancelChange(change.id)
+      .then(() => getChange(change.id))
+      .then((status) => {
+        setChange(status);
+        setChangeBusy(false);
+      })
+      .catch(changeFailure);
+  };
+
+  const handleRefine = (task: string) => {
+    if (!change) return;
+    setChangeError(null);
+    setChangeBusy(true);
+    setChangeActivity([]);
+    setChangeRunStartedAt(null);
+    refineChange(change.id, task)
+      .then((status) => {
+        setChange(status);
+        setChangeBusy(false);
+      })
+      .catch(changeFailure);
+  };
+
+  /**
+   * Apply, then keep the schemas honest (FR-11): the live snapshot moves — the stale
+   * banner follows — the open view is regenerated when the change touched it, and every
+   * other affected loaded view is offered an Update button.
+   */
+  const handleApply = (confirmOutside: boolean) => {
+    if (!change) return;
+    setChangeError(null);
+    setChangeBusy(true);
+    applyChange(change.id, confirmOutside)
+      .then(async (applied) => {
+        setLive(applied.snapshot);
+        setChange(await getChange(change.id));
+        setChangeBusy(false);
+        if (applied.movedSince) setNotice(applied.note);
+        const loaded = applied.affectedViews.filter((scope) => views.has(viewKey(scope.level, scope.id)));
+        const open = current ? loaded.find((scope) => sameScope(scope, current.scope)) : undefined;
+        setPendingUpdates(loaded.filter((scope) => !open || !sameScope(scope, open)));
+        if (open) void load(open.level, open.id, open.label, { refresh: true });
+      })
+      .catch(changeFailure);
+  };
+
+  const handleDiscard = () => {
+    if (!change) return;
+    setChangeError(null);
+    setChangeBusy(true);
+    discardChange(change.id)
+      .then((status) => {
+        setChange(status);
+        setChangeBusy(false);
+      })
+      .catch(changeFailure);
+  };
+
+  const closeChange = () => {
+    setChange(null);
+    setChangeActivity([]);
+    setChangeRunStartedAt(null);
+    setChangeError(null);
+  };
+
   const handleOpenRepo = async (path: string) => {
     setOpening(true);
     setError(null);
     try {
-      setState(await openRepo(path));
+      const opened = await openRepo(path);
+      setState(opened);
       setStack([]);
       // The basket is per repository: ids of one repository mean nothing in another.
       setBasket(EMPTY_BASKET);
       setFocused(null);
       setViews(new Map());
+      closeChange();
+      setPendingUpdates([]);
+      pickUpOpenChange(opened.activeChangeId);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -379,6 +581,15 @@ export function App() {
   const stale = response ? response.stale || (live !== null && live.stateId !== response.view.snapshot.stateId) : false;
   const deeper = current ? nextLevel(current.scope.level) : null;
   const deeperSupported = deeper !== null && state.generatableLevels.includes(deeper);
+  const runDisabledReason = !state.isGitRepo
+    ? 'Changes need a git repository: this directory is not one.'
+    : state.changeAgent === null
+      ? 'This server has no change agent configured.'
+      : isOpenChange(change)
+        ? 'A change is already open; apply or discard it first.'
+        : changeBusy
+          ? 'Starting…'
+          : null;
 
   return (
     <div className="sz-app">
@@ -422,6 +633,30 @@ export function App() {
         </div>
       ) : null}
 
+      {pendingUpdates.length > 0 ? (
+        <div className="sz-affected-banner">
+          <span>Schemas describing code that just changed — regenerate to see the current state:</span>
+          {pendingUpdates.map((scope) => (
+            <span key={`${scope.level}:${scope.id}`} className="sz-affected-view">
+              <button type="button" className="sz-link" onClick={() => void load(scope.level, scope.id, scope.label)}>
+                {scope.level} · {scope.label}
+              </button>
+              <button
+                type="button"
+                className="sz-button sz-button-small"
+                disabled={busy}
+                onClick={() => void load(scope.level, scope.id, scope.label, { refresh: true })}
+              >
+                Update
+              </button>
+            </span>
+          ))}
+          <button type="button" className="sz-link" onClick={() => setPendingUpdates([])}>
+            dismiss
+          </button>
+        </div>
+      ) : null}
+
       {notice ? <div className="sz-notice-banner">{notice}</div> : null}
       {error ? <div className="sz-error-banner">{error}</div> : null}
 
@@ -447,17 +682,35 @@ export function App() {
                 onSelectNode={(id) => selectReplace({ kind: 'node', id }, response.view)}
                 onGoToSubsystem={goToSubsystem}
               />
-              <ContextPanel
-                views={loadedViews}
-                currentView={response.view}
-                basket={basket}
-                live={live}
-                onRemove={removeItem}
-                onClear={clearBasket}
-                onExpand={expand}
-                onOpenEvidence={setViewing}
-                onFocus={focusItem}
-              />
+              {change ? (
+                <ChangePanel
+                  change={change}
+                  activity={changeActivity}
+                  runStartedAt={changeRunStartedAt}
+                  busy={changeBusy}
+                  error={changeError}
+                  onCancel={handleChangeCancel}
+                  onRefine={handleRefine}
+                  onApply={handleApply}
+                  onDiscard={handleDiscard}
+                  onOpenView={(scope) => void load(scope.level, scope.id, scope.label)}
+                  onClose={closeChange}
+                />
+              ) : (
+                <ContextPanel
+                  views={loadedViews}
+                  currentView={response.view}
+                  basket={basket}
+                  live={live}
+                  onRemove={removeItem}
+                  onClear={clearBasket}
+                  onExpand={expand}
+                  onOpenEvidence={setViewing}
+                  onFocus={focusItem}
+                  runDisabledReason={runDisabledReason}
+                  onRun={handleRun}
+                />
+              )}
             </div>
           </>
         ) : (
