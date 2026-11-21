@@ -96,7 +96,30 @@ pre {
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: 1fr 360px;
+  grid-template-columns: 1fr 380px;
+}
+
+/* The right column: the inspector (focused item) above the context panel (basket). */
+.sz-side {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.sz-side .sz-inspector {
+  flex: 0 1 auto;
+  max-height: 50%;
+  border-left: none;
+  border-bottom: 1px solid var(--border);
+}
+
+.sz-context-panel {
+  flex: 1 1 50%;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 14px 16px;
 }
 
 .sz-canvas {
@@ -179,9 +202,56 @@ pre {
   background: #f3eefb;
 }
 
+.sz-legend-hint {
+  flex-basis: 100%;
+  font-size: 10px;
+}
+
+/* In the basket: tinted. Focused (shown in the inspector): the stronger outline. */
 .sz-node-selected {
   border-color: var(--accent);
+  background: #dce8fb;
+  box-shadow: 0 0 0 2px rgba(47, 111, 208, 0.25);
+}
+
+.sz-node-selected.sz-node-openable {
+  box-shadow: 0 0 0 2px rgba(47, 111, 208, 0.25), inset 0 -3px 0 rgba(47, 111, 208, 0.35);
+}
+
+.sz-node-focused {
+  border-color: var(--accent);
   border-width: 2px;
+}
+
+/* React Flow's own selection outline is replaced by the basket/focus styles above. */
+.react-flow__node-default.selected,
+.react-flow__node-default.selected:hover,
+.react-flow__node-default:focus,
+.react-flow__node-default:focus-visible {
+  box-shadow: none;
+}
+
+.react-flow__node-default.selected.sz-node-selected,
+.react-flow__node-default.selected.sz-node-selected:hover {
+  box-shadow: 0 0 0 2px rgba(47, 111, 208, 0.25);
+}
+
+.sz-edge-selected .react-flow__edge-path {
+  filter: drop-shadow(0 0 2px rgba(47, 111, 208, 0.55));
+}
+
+.react-flow__selection {
+  background: rgba(47, 111, 208, 0.08);
+  border: 1px dashed var(--accent);
+}
+
+/*
+ * React Flow draws a group-selection rectangle over the selected nodes once a marquee
+ * ends, and it catches every click until the pane is clicked. The basket is the
+ * selection here, so the rectangle has no job and must not swallow clicks.
+ */
+.react-flow__nodesselection-rect {
+  display: none;
 }
 
 .sz-inspector {
@@ -295,14 +365,132 @@ pre {
   margin: 3px 0;
 }
 
-.sz-context {
-  margin-top: 8px;
-  max-height: 320px;
-  overflow: auto;
-  background: var(--bg);
+.sz-badge-ok {
+  border-color: #b9d6b6;
+  background: #eef7ec;
+  color: #37693a;
+}
+
+/* The context panel: the basket and what it amounts to. */
+.sz-context-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sz-context-panel h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.sz-context-panel h3 {
+  margin: 14px 0 4px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.sz-context-panel p {
+  margin: 4px 0;
+}
+
+.sz-expand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 4px;
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+
+.sz-expand select {
+  font: inherit;
+  padding: 2px 4px;
+}
+
+.sz-context-warnings {
+  margin: 8px 0 0;
+  padding: 8px 10px 8px 24px;
+  background: var(--warn-bg);
+  border: 1px solid #e3cf9c;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.sz-basket {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sz-basket-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.sz-basket-title {
+  font-weight: 600;
+  flex: 0 1 auto;
+}
+
+.sz-basket-detail {
+  flex: 1 1 auto;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sz-basket-unresolved .sz-basket-title {
+  color: var(--muted);
+  font-weight: 400;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.sz-remove {
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 4px;
+}
+
+.sz-remove:hover {
+  color: var(--stale);
+}
+
+.sz-paths {
+  margin: 0;
+  padding-left: 16px;
+}
+
+.sz-copy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.sz-copied {
+  color: #37693a;
+  font-size: 12px;
+}
+
+.sz-copy-fallback textarea {
+  width: 100%;
+  margin: 4px 0;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 8px;
+  padding: 6px;
 }
 
 .sz-stale-banner,

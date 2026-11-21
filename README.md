@@ -10,7 +10,7 @@ Product concept and scope: [`docs/SPEC.md`](docs/SPEC.md). The repository name i
 
 ## What works today
 
-Steps 1 and 2 of 5 of the product cycle — **Explore** and **Zoom** (SPEC §6.1, §6.2):
+Steps 1–3 of 5 of the product cycle — **Explore**, **Zoom** and **Select** (SPEC §6.1–6.3):
 
 - **L4** — the applications, packages and runtime boundaries of the repository.
 - **L3** — the subsystems of one application, generated **when you open it** and not
@@ -26,6 +26,14 @@ Steps 1 and 2 of 5 of the product cycle — **Explore** and **Zoom** (SPEC §6.1
 - Breadcrumbs L4 → L3 → L2; going back up is served from memory, not regenerated.
 - Clicking a node shows what it is, which subsystems it belongs to, and its code links;
   a link opens the file with the evidence lines highlighted.
+- **Selection across levels** (SPEC §6.3, FR-07): click, Shift/Ctrl/Cmd+click and a
+  marquee put nodes and relations into a basket that survives navigating between L4,
+  L3 and L2. The **Context** panel turns the basket into the structured AI context of
+  SPEC §8.4 (FR-08) — entities, merged file ranges, internal and external relations with
+  their confirmed/unverified status, change limits, snapshots and warnings — expands it
+  along confirmed dependencies (FR-12), and copies it as Markdown or JSON. The same
+  context is served by `POST /api/context`. See
+  [Selecting and building context](#selecting-and-building-context).
 - Relations the agent could not confirm in the code are drawn as **unverified** rather
   than hidden, and boundary nodes are visually distinct from your code (SPEC §5.4).
 - Every schema is pinned to a branch, a commit and the state of the working tree, and is
@@ -37,15 +45,60 @@ Steps 1 and 2 of 5 of the product cycle — **Explore** and **Zoom** (SPEC §6.1
   the wait and the tokens by pressing **Regenerate**. The agent is part of the key, so
   the fake agent below never shares entries with Claude.
 
-Not built yet (steps 3–5): selection-driven prompting, AI changes with verification, and
-L1 behaviour views. The graph model, the agent interface and the cache are shaped for
-them — a new level is a prompt builder registered in `src/server/agent/prompts.ts`, and
-`buildSelectionContext()` in `src/shared/graph.ts` already turns a selection into the
-structured context a change agent needs (SPEC §8.4).
+Not built yet (steps 4–5): AI changes with verification, and L1 behaviour views. The
+graph model, the agent interface and the cache are shaped for them — a new level is a
+prompt builder registered in `src/server/agent/prompts.ts`, and the context the Change
+Agent will consume is exactly what the Context panel already produces.
 
 **MVP limits:** analyzed projects must be TypeScript or JavaScript. A schema is an
 interpretation of code at one moment, not documentation — and a relation SoftZoom does
 not draw is not proof that none exists (SPEC §R5).
+
+## Selecting and building context
+
+The selection is a **basket** of nodes and relations, kept per open repository; it is
+cleared when you open another one. Items from several levels can sit in it at once.
+
+- **Click** a node or a relation: it replaces the selection *on the current level* and is
+  shown in the inspector. Items you picked on other levels stay in the basket.
+- **Shift+click**, **Ctrl+click** or **Cmd+click** toggles an item in or out.
+- **Drag** a rectangle on the empty canvas to add the nodes it touches (relations are
+  added by clicking them). Pan with the middle or right mouse button or with Space held
+  down, zoom with the wheel; nodes can still be dragged to tidy the layout.
+- **Double-click** a node to open it one level deeper, as before.
+
+The **Context** panel under the inspector lists the basket grouped by level and scope,
+each item with a remove button, and a **Clear** button. **Expand with dependencies**
+adds the neighbours of the selected nodes of the current view — incoming, outgoing or
+both — over **confirmed** relations only: an unverified relation is not a fact to expand
+along (SPEC §5.4). Below that the panel shows what the selection amounts to:
+
+- **Size** — how many files and lines of evidence the selection covers.
+- **Files** — every file with its line ranges, merged so nothing is listed twice;
+  clicking a range opens the file with those lines highlighted.
+- **Internal relations** (both ends selected) and **external relations** (one end
+  selected), each marked **confirmed** or **unverified** with the reason.
+- **Change limits** — the paths a change may touch without widening the scope.
+- **Warnings** — items whose view was generated against another repository state than
+  the one on disk, a basket mixing views of different states, and ids whose view is not
+  loaded or that are no longer in it. Nothing is silently dropped.
+
+**Copy as Markdown** and **Copy as JSON** put the context on the clipboard, ready to
+paste into a chat with an AI; when the clipboard is unavailable the text appears in a
+box to copy from. The context contains paths and line ranges, never file contents.
+
+The server builds the same context from the views it has already produced:
+
+```bash
+curl -s http://127.0.0.1:4319/api/context \
+  -H 'content-type: application/json' \
+  -d '{"nodeIds":["L4:root/app","L3:L4:root/app/logging"],"edgeIds":[],"task":"add a request id"}'
+# …?format=markdown returns text/markdown instead of JSON
+```
+
+It never triggers a generation: an id of a view that has not been opened yet is
+reported in `warnings` and left out. `400` for a malformed body, `409` when no
+repository is open.
 
 ## Requirements
 

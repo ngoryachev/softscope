@@ -2,6 +2,8 @@
 import type {
   ApiError,
   CancelRequest,
+  ContextRequest,
+  ContextResponse,
   FileResponse,
   GraphResponse,
   OpenRepoRequest,
@@ -99,3 +101,20 @@ export function subscribeProgress(
 }
 
 export const getFile = (path: string) => json<FileResponse>(`/api/file?path=${encodeURIComponent(path)}`);
+
+/** The structured context of a selection, as the server computes it from its loaded views. */
+export const getContext = (req: ContextRequest) => post<ContextResponse>('/api/context', req);
+
+/** The same context rendered as Markdown by the server. */
+export async function getContextMarkdown(req: ContextRequest): Promise<string> {
+  const res = await fetch('/api/context?format=markdown', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as Partial<ApiError>;
+    throw new Error(body.error ?? `Request failed (${res.status})`);
+  }
+  return res.text();
+}

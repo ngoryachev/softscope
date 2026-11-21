@@ -9,6 +9,8 @@ export default defineConfig({
   build: { outDir: '../../dist/web', emptyOutDir: true },
   server: {
     host: '127.0.0.1',
-    proxy: { '/api': `http://127.0.0.1:${serverPort}` },
+    // Anchored with a trailing slash: a plain `/api` prefix also matches the UI module
+    // `/api.ts`, which the backend answers with 404 and the app never mounts.
+    proxy: { '^/api/': `http://127.0.0.1:${serverPort}` },
   },
 });

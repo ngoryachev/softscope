@@ -9,6 +9,7 @@ import { createElement as h, type ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { App } from '../src/web/App';
 import { Breadcrumbs } from '../src/web/components/Breadcrumbs';
+import { ContextPanel } from '../src/web/components/ContextPanel';
 import { FileViewer } from '../src/web/components/FileViewer';
 import { GenerationProgress, formatElapsed } from '../src/web/components/GenerationProgress';
 import { GraphCanvas } from '../src/web/components/GraphCanvas';
@@ -172,15 +173,33 @@ const l2View: GraphView = {
 const noop = () => undefined;
 const render = (element: ReactElement) => renderToStaticMarkup(element);
 
+const emptyBasket = { nodeIds: new Set<string>(), edgeIds: new Set<string>() };
+
 const inspector = (over: { selectedNodeId?: string | null; selectedEdgeId?: string | null } = {}) =>
   render(
     h(Inspector, {
       view,
-      selectedNodeId: over.selectedNodeId ?? null,
-      selectedEdgeId: over.selectedEdgeId ?? null,
+      focused: over.selectedNodeId
+        ? { kind: 'node', id: over.selectedNodeId }
+        : over.selectedEdgeId
+          ? { kind: 'edge', id: over.selectedEdgeId }
+          : null,
       onOpenEvidence: noop,
       onOpenNode: noop,
       onSelectNode: noop,
+    }),
+  );
+
+const canvas = (v: GraphView, focusedNodeId: string | null = null) =>
+  render(
+    h(GraphCanvas, {
+      view: v,
+      basket: focusedNodeId ? { nodeIds: new Set([focusedNodeId]), edgeIds: new Set<string>() } : emptyBasket,
+      focused: focusedNodeId ? { kind: 'node', id: focusedNodeId } : null,
+      onSelect: noop,
+      onMarquee: noop,
+      onClearFocus: noop,
+      onOpenNode: noop,
     }),
   );
 
@@ -202,17 +221,9 @@ describe('screens render', () => {
   });
 
   it('renders the graph canvas with a node and an edge', () => {
-    const html = render(
-      h(GraphCanvas, {
-        view,
-        selectedNodeId: 'srv',
-        selectedEdgeId: null,
-        onSelectNode: noop,
-        onSelectEdge: noop,
-        onOpenNode: noop,
-      }),
-    );
+    const html = canvas(view, 'srv');
     expect(html).toContain('unverified relation'); // the legend explains the dashed edges
+    expect(html).toContain('Shift/Ctrl+click'); // and how to select several
     expect(html.length).toBeGreaterThan(200);
   });
 });
@@ -254,16 +265,7 @@ describe('generation progress', () => {
 
 describe('L2 view', () => {
   it('explains a data-flow legend and calls a boundary node outside this area', () => {
-    const html = render(
-      h(GraphCanvas, {
-        view: l2View,
-        selectedNodeId: null,
-        selectedEdgeId: null,
-        onSelectNode: noop,
-        onSelectEdge: noop,
-        onOpenNode: noop,
-      }),
-    );
+    const html = canvas(l2View);
     expect(html).toContain('arrow = data passed, label = what is passed');
     expect(html).toContain('boundary (outside this area)');
     expect(html).not.toContain('outside the repository');
@@ -274,8 +276,7 @@ describe('L2 view', () => {
       h(Inspector, {
         view: l2View,
         parentView: l3View,
-        selectedNodeId: 'add',
-        selectedEdgeId: null,
+        focused: { kind: 'node', id: 'add' },
         onOpenEvidence: noop,
         onOpenNode: noop,
         onSelectNode: noop,
@@ -290,8 +291,7 @@ describe('L2 view', () => {
       render(
         h(Inspector, {
           view: l2View,
-          selectedNodeId: id,
-          selectedEdgeId: null,
+          focused: { kind: 'node', id },
           onOpenEvidence: noop,
           onOpenNode: noop,
           onSelectNode: noop,
@@ -349,5 +349,149 @@ describe('inspector', () => {
     const html = inspector({ selectedEdgeId: 'srv-db' });
     expect(html).toContain('unverified');
     expect(html).toContain('the connection string comes from the environment');
+  });
+
+  it('no longer dumps the raw context: that moved to the context panel', () => {
+    expect(inspector({ selectedNodeId: 'srv' })).not.toContain('context for an AI change');
+  });
+});
+
+describe('context panel', () => {
+  const panel = (basket: { nodeIds: Set<string>; edgeIds: Set<string> }, live: Snapshot | null = snapshot) =>
+    render(
+      h(ContextPanel, {
+        views: [view, l3View],
+        currentView: l3View,
+        basket,
+        live,
+        onRemove: noop,
+        onClear: noop,
+        onExpand: noop,
+        onOpenEvidence: noop,
+        onFocus: noop,
+      }),
+    );
+
+  it('lists the basket grouped by level with size, warnings, badges, files and copy buttons', () => {
+    const html = panel(
+      {
+        nodeIds: new Set(['srv', 'L3:L4:root/server/http', 'L2:L3:L4:root/server/http/handler']),
+        edgeIds: new Set(['srv-db']),
+      },
+      { ...snapshot, shortCommit: 'bbbbbbbb', stateId: 'other' },
+    );
+
+    expect(html).toContain('4 items');
+    expect(html).toContain('L4 · Applications');
+    expect(html).toContain('L3 · Subsystems');
+    expect(html).toContain('>server<');
+    expect(html).toContain('>http<');
+    expect(html).toContain('server → Postgres'); // the selected relation, from → to
+    expect(html).toContain('L2:L3:L4:root/server/http/handler'); // the unresolved id, still removable
+    expect(html).toContain('not loaded');
+    expect(html).toContain('Remove ');
+    expect(html).toContain('>Clear<');
+    expect(html).toContain('Expand with dependencies');
+    expect(html).toContain('incoming');
+
+    expect(html).toContain('2 files');
+    expect(html).toContain('6 lines'); // src/a.ts 1-3 (2-2 merged in) and src/http.ts 1-3
+    expect(html).toContain('src/a.ts:1-3');
+    expect(html).toContain('src/http.ts:1-3');
+    expect(html).toContain('unverified'); // the srv -> db relation badge
+    expect(html).toContain('the repository is now at main@bbbbbbbb'); // stale warning
+    expect(html).toContain('which is not loaded'); // unresolved warning
+    expect(html).toContain('Change limits');
+    expect(html).toContain('Copy as Markdown');
+    expect(html).toContain('Copy as JSON');
+  });
+
+  it('explains how to select when the basket is empty', () => {
+    const html = panel(emptyBasket);
+    expect(html).toContain('0 items');
+    expect(html).toContain('Nothing selected');
+    expect(html).not.toContain('Copy as Markdown');
+  });
+});
+
+describe('context panel — more', () => {
+  const panel = (
+    basket: { nodeIds: Set<string>; edgeIds: Set<string> },
+    over: { currentView?: GraphView | null; views?: GraphView[]; live?: Snapshot | null } = {},
+  ) =>
+    render(
+      h(ContextPanel, {
+        views: over.views ?? [view, l3View, l2View],
+        currentView: over.currentView === undefined ? l3View : over.currentView,
+        basket,
+        live: over.live === undefined ? snapshot : over.live,
+        onRemove: noop,
+        onClear: noop,
+        onExpand: noop,
+        onOpenEvidence: noop,
+        onFocus: noop,
+      }),
+    );
+  const expandButton = (html: string) => /<button[^>]*>Expand<\/button>/.exec(html)?.[0] ?? '';
+  const clearButton = (html: string) => /<button[^>]*>Clear<\/button>/.exec(html)?.[0] ?? '';
+
+  it('disables Expand unless a basket node is in the current view, and Clear when empty', () => {
+    expect(clearButton(panel(emptyBasket))).toContain('disabled');
+    expect(expandButton(panel(emptyBasket))).toContain('disabled');
+
+    const l4Only = { nodeIds: new Set(['srv']), edgeIds: new Set<string>() };
+    expect(clearButton(panel(l4Only))).not.toContain('disabled');
+    expect(expandButton(panel(l4Only, { currentView: l3View }))).toContain('disabled');
+    expect(expandButton(panel(l4Only, { currentView: view }))).not.toContain('disabled');
+    expect(expandButton(panel(l4Only, { currentView: null }))).toContain('disabled');
+    // A relation alone does not expand: only nodes have neighbours.
+    const edgeOnly = { nodeIds: new Set<string>(), edgeIds: new Set(['srv-db']) };
+    expect(expandButton(panel(edgeOnly, { currentView: view }))).toContain('disabled');
+  });
+
+  it('shows a confirmed internal relation, its label, merged files and fallback change limits', () => {
+    const html = panel({ nodeIds: new Set<string>(), edgeIds: new Set(['handler-add']) }, { currentView: l2View });
+    expect(html).toContain('1 item');
+    expect(html).toContain('L2 · Entities');
+    expect(html).toContain('>calls<'); // the relation's title in the basket is its kind
+    expect(html).toContain('handleRequest → add');
+    expect(html).toContain('Internal relations');
+    expect(html).toContain('sz-badge-ok');
+    expect(html).toContain('>confirmed<');
+    expect(html).toContain('(calls, two parsed numbers)');
+    expect(html).not.toContain('sz-badge-warn');
+    expect(html).toContain('2 files');
+    expect(html).toContain('6 lines');
+    expect(html).toContain('src/http.ts:1-3'); // 1-3 of the node plus 2-2 of the edge, merged
+    expect(html).toContain('src/math.ts:1-3');
+    expect(html).toContain('<code>src/http.ts</code>');
+    expect(html).toContain('<code>src/math.ts</code>'); // `add` has no paths: its evidence file stands in
+    expect(html).not.toContain('sz-warn'); // same snapshot as live, everything resolved
+    // The relation's endpoints are in the context but not in the basket: nothing to expand from.
+    expect(expandButton(html)).toContain('disabled');
+  });
+
+  it('marks an item that is gone from its loaded view and warns about mixed snapshots', () => {
+    const moved: GraphView = { ...l3View, snapshot: { ...snapshot, shortCommit: 'bbbbbbbb', stateId: 'other' } };
+    const html = panel(
+      { nodeIds: new Set(['srv', 'L3:L4:root/server/gone', 'L3:L4:root/server/http']), edgeIds: new Set<string>() },
+      { views: [view, moved], live: null },
+    );
+    expect(html).toContain('no longer in this view');
+    expect(html).toContain('sz-basket-unresolved');
+    expect(html).toContain('no longer exists in view L3:L4:root/server');
+    expect(html).toContain('different repository states');
+    // No live snapshot was given: nothing can be called stale.
+    expect(html).not.toContain('the repository is now at');
+  });
+
+  it('renders without a live snapshot and without any loaded view', () => {
+    const html = panel({ nodeIds: new Set(['L4:root/x']), edgeIds: new Set<string>() }, { views: [], currentView: null, live: null });
+    expect(html).toContain('1 item');
+    expect(html).toContain('not loaded');
+    expect(html).toContain('which is not loaded');
+    expect(html).toContain('L4 · Applications');
+    expect(html).toContain('0 files');
+    expect(html).toContain('Copy as JSON');
   });
 });

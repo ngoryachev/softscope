@@ -1,25 +1,17 @@
 /**
- * Details of the current selection: what it is, which subsystems it belongs to, and the
- * code links that back it up. The structured context it shows is the same
- * `buildSelectionContext` output a later Change Agent will consume (SPEC §8.4).
+ * Details of the focused item — the node or relation clicked last: what it is, which
+ * subsystems it belongs to, and the code links that back it up. The selection basket
+ * and the structured context built from it live in the ContextPanel next door.
  */
-import { useMemo, useState } from 'react';
-import {
-  buildSelectionContext,
-  edgesOf,
-  findNode,
-  membersOf,
-  subsystemsOf,
-  type Evidence,
-  type GraphView,
-} from '../../shared/graph';
+import { edgesOf, findNode, membersOf, subsystemsOf, type Evidence, type GraphView } from '../../shared/graph';
+import type { SelectableRef } from './GraphCanvas';
 
 export interface InspectorProps {
   view: GraphView;
   /** The view this one was opened from, when there is one: names the linked subsystems. */
   parentView?: GraphView | null;
-  selectedNodeId: string | null;
-  selectedEdgeId: string | null;
+  /** The item clicked last; null shows the scope itself. */
+  focused: SelectableRef | null;
   onOpenEvidence: (evidence: Evidence) => void;
   onOpenNode: (id: string) => void;
   onSelectNode: (id: string) => void;
@@ -61,25 +53,14 @@ function EvidenceList({
 export function Inspector({
   view,
   parentView,
-  selectedNodeId,
-  selectedEdgeId,
+  focused,
   onOpenEvidence,
   onOpenNode,
   onSelectNode,
   onGoToSubsystem,
 }: InspectorProps) {
-  const [showContext, setShowContext] = useState(false);
-  const node = selectedNodeId ? findNode(view, selectedNodeId) : undefined;
-  const edge = selectedEdgeId ? view.edges.find((e) => e.id === selectedEdgeId) : undefined;
-
-  const context = useMemo(
-    () =>
-      buildSelectionContext(view, {
-        nodeIds: selectedNodeId ? [selectedNodeId] : [],
-        edgeIds: selectedEdgeId ? [selectedEdgeId] : [],
-      }),
-    [view, selectedNodeId, selectedEdgeId],
-  );
+  const node = focused?.kind === 'node' ? findNode(view, focused.id) : undefined;
+  const edge = focused?.kind === 'edge' ? view.edges.find((e) => e.id === focused.id) : undefined;
 
   if (!node && !edge) {
     return (
@@ -88,7 +69,10 @@ export function Inspector({
         <p className="sz-muted">
           {view.scope.level} · {view.diagramKind} · {view.nodes.length} nodes, {view.edges.length} relations
         </p>
-        <p className="sz-muted">Click a node or a relation. Double-click a node to open it one level deeper.</p>
+        <p className="sz-muted">
+          Click a node or a relation to inspect it. Shift/Ctrl+click or drag a rectangle to select several for the
+          context. Double-click a node to open it one level deeper.
+        </p>
         {view.notes.length > 0 ? (
           <section>
             <h3>What the analysis could not establish</h3>
@@ -193,13 +177,6 @@ export function Inspector({
           </ul>
         </section>
       ) : null}
-
-      <section>
-        <button type="button" className="sz-link" onClick={() => setShowContext((v) => !v)}>
-          {showContext ? 'Hide' : 'Show'} context for an AI change ({context.files.length} files)
-        </button>
-        {showContext ? <pre className="sz-context">{JSON.stringify(context, null, 2)}</pre> : null}
-      </section>
     </aside>
   );
 }

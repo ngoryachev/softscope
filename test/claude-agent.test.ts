@@ -4,7 +4,8 @@
  * signal is already aborted before the call) and tool calls are reported as progress.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ClaudeSchemaAgent } from '../src/server/agent/claude';
+import { join } from 'node:path';
+import { ClaudeSchemaAgent, describeToolInput, repoRelative } from '../src/server/agent/claude';
 import { AgentError, type AgentActivity, type GenerateRequest } from '../src/server/agent/types';
 import { buildIndex } from '../src/server/indexer/index';
 import { rootScope } from '../src/shared/graph';
@@ -76,6 +77,42 @@ describe('ClaudeSchemaAgent', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('reports the paths the agent touches relative to the analyzed repository', async () => {
+    script = async function* () {
+      yield {
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', name: 'Read', input: { file_path: join(repo, 'src/core/math.ts') } },
+            { type: 'tool_use', name: 'Grep', input: { pattern: 'add', path: join(repo, 'src') } },
+            { type: 'tool_use', name: 'Read', input: { file_path: '/etc/hosts' } },
+            { type: 'tool_use', name: 'Glob', input: { pattern: '**/*.ts' } },
+          ],
+        },
+      };
+      yield { type: 'result', subtype: 'success', structured_output: reply, result: '' };
+    };
+    const seen: AgentActivity[] = [];
+    const agent = new ClaudeSchemaAgent();
+
+    await agent.generate({ ...request(), onProgress: (e) => seen.push(e) });
+
+    expect(seen).toEqual([
+      { tool: 'Read', detail: 'src/core/math.ts' },
+      { tool: 'Grep', detail: 'add in src' },
+      { tool: 'Read', detail: '/etc/hosts' },
+      { tool: 'Glob', detail: '**/*.ts' },
+    ]);
+  });
+
+  it('leaves a relative or foreign path and the fallback detail untouched', () => {
+    expect(describeToolInput('Read', { file_path: 'src/a.ts' }, '/repo')).toBe('src/a.ts');
+    expect(describeToolInput('Read', { file_path: '/repo/src/a.ts' }, '/repo')).toBe('src/a.ts');
+    expect(describeToolInput('Read', { file_path: '/repository/src/a.ts' }, '/repo')).toBe('/repository/src/a.ts');
+    expect(describeToolInput('Grep', { pattern: 'x' }, '/repo')).toBe('x');
+    expect(describeToolInput('Bash', { command: 'ls' }, '/repo')).toBe('ls');
+  });
+
   it('aborts the SDK call when the request signal is aborted during the run', async () => {
     const controller = new AbortController();
     let sawAbort = false;
@@ -115,5 +152,32 @@ describe('ClaudeSchemaAgent', () => {
     };
     const agent = new ClaudeSchemaAgent();
     await expect(agent.generate(request())).rejects.toBeInstanceOf(AgentError);
+  });
+});
+
+describe('repoRelative', () => {
+  it('relativises only absolute paths inside the repository', () => {
+    expect(repoRelative(join(repo, 'src', 'core', 'math.ts'), repo)).toBe('src/core/math.ts');
+    expect(repoRelative(join(repo, 'src', '..', 'src', 'core', 'math.ts'), repo)).toBe('src/core/math.ts');
+    expect(repoRelative(repo, repo)).toBe('.');
+    expect(repoRelative(`${repo}/`, repo)).toBe('.');
+    // A trailing slash on the repository path changes nothing.
+    expect(repoRelative(join(repo, 'src', 'core', 'math.ts'), `${repo}/`)).toBe('src/core/math.ts');
+    // A sibling directory that merely shares the prefix is outside the repository.
+    expect(repoRelative(`${repo}-other/src/a.ts`, repo)).toBe(`${repo}-other/src/a.ts`);
+    expect(repoRelative(join(repo, '..', 'elsewhere.ts'), repo)).toBe(join(repo, '..', 'elsewhere.ts'));
+    // Relative paths and a missing repository path pass through untouched.
+    expect(repoRelative('src/a.ts', repo)).toBe('src/a.ts');
+    expect(repoRelative(join(repo, 'src/a.ts'))).toBe(join(repo, 'src/a.ts'));
+  });
+
+  it('is applied to Read.path and Grep.path and nowhere else', () => {
+    expect(describeToolInput('Read', { path: join(repo, 'src/a.ts') }, repo)).toBe('src/a.ts');
+    expect(describeToolInput('Grep', { pattern: 'x' }, repo)).toBe('x');
+    expect(describeToolInput('Grep', { pattern: 'x', path: join(repo, 'src') }, repo)).toBe('x in src');
+    expect(describeToolInput('Bash', { command: `cat ${join(repo, 'src/a.ts')}` }, repo)).toContain(repo);
+    // Without a known detail the raw input is shown, as before.
+    expect(describeToolInput('Read', {}, repo)).toBe('{}');
+    expect(describeToolInput('Read', null, repo)).toBe('{}');
   });
 });

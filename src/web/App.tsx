@@ -1,20 +1,29 @@
 /**
- * Explore and Zoom (SPEC §6.1–6.2): the L4 graph of the repository, drill into an
- * application to get its L3 and into a subsystem to get its L2 — each generated at that
- * moment, never before — and back out again through the breadcrumbs. While the agent
- * works the user sees how long it has been running and what it is reading, and can
- * cancel. Clicking a node shows its description and code links; a link opens the file
- * with the evidence lines highlighted.
+ * Explore, Zoom and Select (SPEC §6.1–6.3): the L4 graph of the repository, drill into
+ * an application to get its L3 and into a subsystem to get its L2 — each generated at
+ * that moment, never before — and back out again through the breadcrumbs. While the
+ * agent works the user sees how long it has been running and what it is reading, and
+ * can cancel. Clicking a node shows its description and code links; a link opens the
+ * file with the evidence lines highlighted.
+ *
+ * Selection is a basket that survives navigation between levels of one repository:
+ * a plain click replaces this level's part of it, Shift/Ctrl/Cmd+click toggles, a
+ * marquee adds. The ContextPanel turns the basket into the structured AI context.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { GraphResponse, ProgressEvent, RepoState, ValidationIssue } from '../shared/api';
 import {
+  expandSelection,
   findNode,
   LEVELS,
   levelOfNodeId,
   nextLevel,
   scopeOwnerOf,
+  viewKey,
+  viewKeyOfId,
   type Evidence,
+  type ExpandDirection,
+  type GraphView,
   type Level,
   type ScopeRef,
   type Snapshot,
@@ -23,7 +32,8 @@ import { cancelGeneration, GenerationCancelled, getGraph, getSnapshot, getState,
 import { Breadcrumbs } from './components/Breadcrumbs';
 import { FileViewer } from './components/FileViewer';
 import { GenerationProgress, type ProgressActivity } from './components/GenerationProgress';
-import { GraphCanvas } from './components/GraphCanvas';
+import { ContextPanel, ownerView } from './components/ContextPanel';
+import { GraphCanvas, type Basket, type SelectableRef } from './components/GraphCanvas';
 import { Inspector } from './components/Inspector';
 import { RepoPicker } from './components/RepoPicker';
 import { SnapshotBar } from './components/SnapshotBar';
@@ -51,9 +61,23 @@ interface LoadOptions {
   refresh?: boolean;
   /** Select this node once the view is shown (used when jumping to a subsystem's own view). */
   selectNodeId?: string;
+  /** Only focus this item once the view is shown; the basket is left alone. */
+  focus?: SelectableRef;
 }
 
 const depthOf = (level: Level) => LEVELS.indexOf(level);
+
+const EMPTY_BASKET: Basket = { nodeIds: new Set(), edgeIds: new Set() };
+
+const hasItem = (view: GraphView, item: SelectableRef): boolean =>
+  item.kind === 'node' ? findNode(view, item.id) !== undefined : view.edges.some((e) => e.id === item.id);
+
+/** The level an item was picked on, from its id; `view` answers for ids in no known form. */
+function levelOfItem(item: SelectableRef, view: GraphView | null): Level | null {
+  const parsed = viewKeyOfId(item.id)?.level;
+  if (parsed) return parsed;
+  return view && hasItem(view, item) ? view.scope.level : null;
+}
 
 export function App() {
   const [state, setState] = useState<RepoState | null>(null);
@@ -64,17 +88,86 @@ export function App() {
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [basket, setBasket] = useState<Basket>(EMPTY_BASKET);
+  const [focused, setFocused] = useState<SelectableRef | null>(null);
+  /** Every view loaded since the repository was opened, by `level:scope` — the context is built over these. */
+  const [views, setViews] = useState<Map<string, GraphView>>(() => new Map());
+  // A stable array, so an unrelated re-render does not hand the ContextPanel a new `views`.
+  const loadedViews = useMemo(() => [...views.values()], [views]);
   const [viewing, setViewing] = useState<Evidence | null>(null);
   const requestId = useRef(0);
+  const basketRef = useRef(basket);
+  basketRef.current = basket;
+  /** The basket before the last click, so a double-click (open) can undo the click that preceded it. */
+  const basketBeforeClick = useRef<Basket | null>(null);
   /** Cancel was pressed before the server had a job for the scope; apply it once it does. */
   const cancelWanted = useRef(false);
 
   const busy = loading !== null;
   const current = stack[stack.length - 1] ?? null;
   const response = current?.response ?? null;
+  const currentView = response?.view ?? null;
   const parentEntry = stack.length >= 2 ? stack[stack.length - 2]! : null;
+
+  /* Selection (SPEC §6.3). The basket keeps items of every level; only the focus is per view. */
+
+  /** A plain click: this level's part of the basket becomes the item, which is focused. */
+  const selectReplace = useCallback((item: SelectableRef, view: GraphView | null) => {
+    const level = view?.scope.level ?? levelOfItem(item, view);
+    basketBeforeClick.current = basketRef.current;
+    setBasket((prev) => {
+      const keep = (kind: SelectableRef['kind'], ids: ReadonlySet<string>) =>
+        new Set([...ids].filter((id) => levelOfItem({ kind, id }, view) !== level));
+      const nodeIds = keep('node', prev.nodeIds);
+      const edgeIds = keep('edge', prev.edgeIds);
+      (item.kind === 'node' ? nodeIds : edgeIds).add(item.id);
+      return { nodeIds, edgeIds };
+    });
+    setFocused(item);
+  }, []);
+
+  /** Shift/Ctrl/Cmd+click: in or out of the basket; the focus follows what is left. */
+  const selectToggle = (item: SelectableRef) => {
+    const inBasket = (item.kind === 'node' ? basket.nodeIds : basket.edgeIds).has(item.id);
+    const nodeIds = new Set(basket.nodeIds);
+    const edgeIds = new Set(basket.edgeIds);
+    const set = item.kind === 'node' ? nodeIds : edgeIds;
+    if (inBasket) set.delete(item.id);
+    else set.add(item.id);
+    basketBeforeClick.current = basket;
+    setBasket({ nodeIds, edgeIds });
+    setFocused(inBasket ? (focused?.kind === item.kind && focused.id === item.id ? null : focused) : item);
+  };
+
+  const addNodes = useCallback((ids: string[]) => {
+    setBasket((prev) => {
+      const fresh = ids.filter((id) => !prev.nodeIds.has(id));
+      if (fresh.length === 0) return prev;
+      return { nodeIds: new Set([...prev.nodeIds, ...fresh]), edgeIds: prev.edgeIds };
+    });
+  }, []);
+
+  const removeItem = (item: SelectableRef) => {
+    setBasket((prev) => {
+      const nodeIds = new Set(prev.nodeIds);
+      const edgeIds = new Set(prev.edgeIds);
+      (item.kind === 'node' ? nodeIds : edgeIds).delete(item.id);
+      return { nodeIds, edgeIds };
+    });
+    setFocused((f) => (f && f.kind === item.kind && f.id === item.id ? null : f));
+  };
+
+  const clearBasket = () => {
+    setBasket(EMPTY_BASKET);
+    setFocused(null);
+  };
+
+  /** FR-12: the neighbours of this view's selected nodes over confirmed relations join the basket. */
+  const expand = (direction: ExpandDirection) => {
+    if (!currentView) return;
+    const inView = currentView.nodes.filter((n) => basket.nodeIds.has(n.id)).map((n) => n.id);
+    addNodes(expandSelection(currentView, inView, direction));
+  };
 
   useEffect(() => {
     getState()
@@ -106,8 +199,14 @@ export function App() {
         const entry: StackEntry = { scope: next.view.scope, response: next };
         return index >= 0 ? [...prev.slice(0, index), entry] : [...prev, entry];
       });
-      setSelectedEdgeId(null);
-      setSelectedNodeId(options.selectNodeId && findNode(next.view, options.selectNodeId) ? options.selectNodeId : null);
+      setViews((prev) => new Map(prev).set(viewKey(next.view.scope.level, next.view.scope.id), next.view));
+      if (options.selectNodeId && findNode(next.view, options.selectNodeId)) {
+        selectReplace({ kind: 'node', id: options.selectNodeId }, next.view);
+      } else if (options.focus && hasItem(next.view, options.focus)) {
+        setFocused(options.focus);
+      } else {
+        setFocused(null);
+      }
       setNotice(null);
     } catch (err) {
       if (id !== requestId.current) return;
@@ -123,7 +222,7 @@ export function App() {
         setCancelling(false);
       }
     }
-  }, []);
+  }, [selectReplace]);
 
   // The first level is requested as soon as a repository is open.
   useEffect(() => {
@@ -195,6 +294,10 @@ export function App() {
     try {
       setState(await openRepo(path));
       setStack([]);
+      // The basket is per repository: ids of one repository mean nothing in another.
+      setBasket(EMPTY_BASKET);
+      setFocused(null);
+      setViews(new Map());
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -223,11 +326,30 @@ export function App() {
       });
   };
 
-  const openNode = (nodeId: string) => {
+  /**
+   * Opens a node one level deeper. A double-click on the canvas arrives after its first
+   * click has already applied the plain-click rule; `undoClick` puts the basket back, so
+   * drilling down does not throw away what was selected on this level.
+   */
+  const openNode = (nodeId: string, options: { undoClick?: boolean } = {}) => {
     if (!response) return;
     const node = findNode(response.view, nodeId);
     if (!node?.childScope) return;
+    if (options.undoClick && basketBeforeClick.current) {
+      setBasket(basketBeforeClick.current);
+      basketBeforeClick.current = null;
+    }
     void load(node.childScope.level, node.childScope.id, node.childScope.label);
+  };
+
+  /** A basket item clicked in the ContextPanel: inspect it, in its own view when that is another one. */
+  const focusItem = (item: SelectableRef) => {
+    if (currentView && hasItem(currentView, item)) {
+      setFocused(item);
+      return;
+    }
+    const owner = ownerView(loadedViews, item);
+    if (owner) void load(owner.scope.level, owner.scope.id, owner.scope.label, { focus: item });
   };
 
   /**
@@ -308,25 +430,35 @@ export function App() {
           <>
             <GraphCanvas
               view={response.view}
-              selectedNodeId={selectedNodeId}
-              selectedEdgeId={selectedEdgeId}
-              onSelectNode={setSelectedNodeId}
-              onSelectEdge={setSelectedEdgeId}
-              onOpenNode={openNode}
+              basket={basket}
+              focused={focused}
+              onSelect={(item, { toggle }) => (toggle ? selectToggle(item) : selectReplace(item, response.view))}
+              onMarquee={addNodes}
+              onClearFocus={() => setFocused(null)}
+              onOpenNode={(id) => openNode(id, { undoClick: true })}
             />
-            <Inspector
-              view={response.view}
-              parentView={parentEntry?.response?.view ?? null}
-              selectedNodeId={selectedNodeId}
-              selectedEdgeId={selectedEdgeId}
-              onOpenEvidence={setViewing}
-              onOpenNode={openNode}
-              onSelectNode={(id) => {
-                setSelectedEdgeId(null);
-                setSelectedNodeId(id);
-              }}
-              onGoToSubsystem={goToSubsystem}
-            />
+            <div className="sz-side">
+              <Inspector
+                view={response.view}
+                parentView={parentEntry?.response?.view ?? null}
+                focused={focused}
+                onOpenEvidence={setViewing}
+                onOpenNode={openNode}
+                onSelectNode={(id) => selectReplace({ kind: 'node', id }, response.view)}
+                onGoToSubsystem={goToSubsystem}
+              />
+              <ContextPanel
+                views={loadedViews}
+                currentView={response.view}
+                basket={basket}
+                live={live}
+                onRemove={removeItem}
+                onClear={clearBasket}
+                onExpand={expand}
+                onOpenEvidence={setViewing}
+                onFocus={focusItem}
+              />
+            </div>
           </>
         ) : (
           <div className="sz-placeholder">
