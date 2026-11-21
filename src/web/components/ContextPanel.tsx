@@ -2,7 +2,8 @@
  * The selection basket and the structured context built from it (SPEC §6.3, §8.4,
  * FR-07, FR-08, FR-12): what is selected across levels, how large the code behind it
  * is, which relations it has inside and outside, where a change may go, and against
- * which repository state all of that holds. Copy as Markdown or JSON hands it to an AI.
+ * which repository state all of that holds. Copy as Markdown or JSON hands it to an AI;
+ * the instruction field and **Run** hand it to SoftZoom's own change agent (SPEC §6.4).
  *
  * The context is computed here with the same `buildSelectionContext` the server uses
  * for `POST /api/context`, over every view loaded since the repository was opened.
@@ -36,6 +37,10 @@ export interface ContextPanelProps {
   onOpenEvidence: (evidence: Evidence) => void;
   /** Show the item in the inspector, navigating to its view when that is another one. */
   onFocus: (item: SelectableRef) => void;
+  /** Why Run is disabled (no git, a change already open); null when it can run. Absent: no Run at all. */
+  runDisabledReason?: string | null;
+  /** Starts a change over the basket with this instruction (SPEC §6.4). */
+  onRun?: (task: string) => void;
 }
 
 interface BasketItem extends SelectableRef {
@@ -126,10 +131,13 @@ export function ContextPanel({
   onExpand,
   onOpenEvidence,
   onFocus,
+  runDisabledReason,
+  onRun,
 }: ContextPanelProps) {
   const [direction, setDirection] = useState<ExpandDirection>('both');
   const [copied, setCopied] = useState<'markdown' | 'json' | null>(null);
   const [fallback, setFallback] = useState<string | null>(null);
+  const [task, setTask] = useState('');
 
   const nodeIds = [...basket.nodeIds];
   const edgeIds = [...basket.edgeIds];
@@ -160,6 +168,9 @@ export function ContextPanel({
   const groups = groupItems(items);
   const count = items.length;
   const canExpand = currentView !== null && currentView.nodes.some((n) => basket.nodeIds.has(n.id));
+  // Run needs something selected and a server that can make changes; the reason is shown.
+  const runBlocked = count === 0 ? 'Select something first.' : runDisabledReason ?? null;
+  const canRun = onRun !== undefined && runBlocked === null && task.trim().length > 0;
 
   const copy = (kind: 'markdown' | 'json') => {
     const text = kind === 'markdown' ? renderContextMarkdown(context) : JSON.stringify(context, null, 2);
@@ -296,6 +307,43 @@ export function ContextPanel({
             <h3>External relations</h3>
             <RelationList relations={context.relations.external} />
           </section>
+
+          {onRun ? (
+            <section className="sz-run">
+              <h3>Instruction</h3>
+              <textarea
+                className="sz-run-task"
+                rows={3}
+                placeholder="What should change in the selected area? e.g. add a request id to every log line"
+                value={task}
+                disabled={runBlocked !== null}
+                onChange={(e) => setTask(e.target.value)}
+              />
+              <div className="sz-run-row">
+                <button
+                  type="button"
+                  className="sz-button sz-button-primary"
+                  disabled={!canRun}
+                  title={runBlocked ?? (task.trim() ? undefined : 'Type an instruction first')}
+                  onClick={() => {
+                    const trimmed = task.trim();
+                    if (!trimmed) return;
+                    onRun(trimmed);
+                    setTask('');
+                  }}
+                >
+                  Run
+                </button>
+                {runBlocked ? (
+                  <span className="sz-muted sz-run-reason">{runBlocked}</span>
+                ) : (
+                  <span className="sz-muted sz-run-reason">
+                    The agent edits an isolated copy; you review the diff before anything touches your files.
+                  </span>
+                )}
+              </div>
+            </section>
+          ) : null}
 
           <section>
             <h3>Change limits</h3>

@@ -10,7 +10,8 @@ Product concept and scope: [`docs/SPEC.md`](docs/SPEC.md). The repository name i
 
 ## What works today
 
-Steps 1–3 of 5 of the product cycle — **Explore**, **Zoom** and **Select** (SPEC §6.1–6.3):
+Steps 1–4 of 5 of the product cycle — **Explore**, **Zoom**, **Select** and
+**Prompt → Change → Verify** (SPEC §6.1–6.5):
 
 - **L4** — the applications, packages and runtime boundaries of the repository.
 - **L3** — the subsystems of one application, generated **when you open it** and not
@@ -45,10 +46,20 @@ Steps 1–3 of 5 of the product cycle — **Explore**, **Zoom** and **Select** (
   the wait and the tokens by pressing **Regenerate**. The agent is part of the key, so
   the fake agent below never shares entries with Claude.
 
-Not built yet (steps 4–5): AI changes with verification, and L1 behaviour views. The
-graph model, the agent interface and the cache are shaped for them — a new level is a
-prompt builder registered in `src/server/agent/prompts.ts`, and the context the Change
-Agent will consume is exactly what the Context panel already produces.
+- **Prompt → Change → Verify** (SPEC §6.4, §6.5, FR-09–FR-11): type an instruction over
+  the basket and press **Run**. A change agent edits an **isolated copy** of your working
+  tree (a git worktree with your uncommitted changes reproduced), the server re-runs the
+  repository's own `typecheck`, `lint` and `test` scripts, and the **Change** panel shows
+  the diff per file, which files fall **outside the selected area**, which components of
+  the loaded schemas are affected, the check results, and a callout when the agent says
+  a safe change **needs a wider scope**. You refine, **Apply** the patch to your tree or
+  **Discard** it. After Apply the open schema is regenerated if it was affected and the
+  other affected schemas get an **Update** button. See
+  [Editing and verifying](#editing-and-verifying).
+
+Not built yet (step 5): L1 behaviour views. The graph model and the agent interface are
+shaped for it — a new level is a prompt builder registered in
+`src/server/agent/prompts.ts`.
 
 **MVP limits:** analyzed projects must be TypeScript or JavaScript. A schema is an
 interpretation of code at one moment, not documentation — and a relation SoftZoom does
@@ -100,6 +111,101 @@ It never triggers a generation: an id of a view that has not been opened yet is
 reported in `warnings` and left out. `400` for a malformed body, `409` when no
 repository is open.
 
+## Editing and verifying
+
+The fourth step of the cycle takes the selection basket and a short instruction and
+turns them into a reviewed patch (SPEC §6.4, §6.5). Nothing touches your files until you
+press Apply.
+
+**Run.** Under the Context panel, type what should change in the selected area and press
+**Run** (enabled when the basket is not empty and the repository is a git repository —
+for a directory without git the button says why it is disabled). The server builds the
+same context `POST /api/context` returns, with your instruction as its task, and starts a
+change.
+
+**Isolation.** The change is made in a `git worktree` of your repository, detached at
+`HEAD`, created under `~/.softscope/changes/<id>` (`SOFTSCOPE_WORK_DIR` overrides the
+parent). Your uncommitted state is reproduced on top: the tracked changes are applied as
+a patch (`git diff HEAD --binary`) and the untracked, non-ignored files are copied. The
+`node_modules` directories of the repository root and of its workspace packages are
+symlinked into the worktree so the checks run without reinstalling. The live snapshot
+the change started from is recorded. The server refuses to start — telling you to commit
+or stash first — when the repository has unmerged paths (a merge or rebase in progress),
+has no commit yet, or when your changes cannot be replayed; analyzing a subdirectory of
+a repository is refused for changes too.
+
+**The agent.** A Claude session runs in the worktree with Read, Grep, Glob, Edit, Write
+and MultiEdit, plus Bash restricted to the detected check commands (`Bash(npm run
+test:*)` and the like). Its prompt is the selection context with your instruction and
+three rules: edit inside the selected paths (the **Change limits** of the context),
+explore dependencies freely, and when a safe change requires going outside the
+selection, *report* it instead of editing there (SPEC §6.4, risks R2 and R5). The
+repository's own `CLAUDE.md`, settings and MCP servers are not loaded. The agent answers
+with a structured report: a summary, the files it changed, the checks it ran and, when
+needed, a `scopeExpansion` with the reason and the paths that would have to join the
+selection.
+
+**Checks.** The server reads the worktree's root `package.json` and runs its
+`typecheck`, `lint` and `test` scripts itself after the agent finishes (runner from the
+lockfile: `pnpm-lock.yaml` → pnpm, `yarn.lock` → yarn, else npm), ten minutes per check,
+and keeps the last 200 lines of combined output. The agent's own report of what it ran
+is shown as information only; these results are the ones that count.
+
+**Verify.** The Change panel shows the diff of the worktree against its recorded base
+(new files included), rendered per file with added and removed lines highlighted. A file
+not under any of the selected paths carries an **outside selected area** badge. The
+**affected components** are the nodes of the schemas you have loaded whose evidence
+files or paths intersect the changed files, grouped by schema. **Refine** runs the agent
+again in the same worktree with a follow-up instruction, the previous report in hand;
+the checks and the diff are recomputed. **Cancel** aborts the agent and keeps the
+worktree so you can look at what it did, or discard it.
+
+**Apply** lands the patch in your working tree with `git apply` — no commit, no staging.
+It is refused, with nothing applied, when the repository moved since the change started
+(a different commit, branch or working-tree state: discard and run again) or when
+`git apply --check` fails. When a changed file lies outside the selected area, the UI
+asks for confirmation first and sends `confirmOutside: true`. On success the worktree
+is removed. **Discard** removes the worktree (`git worktree remove --force` and prune)
+and leaves nothing behind. One change is open at a time per repository; apply or discard
+it before starting another.
+
+**Schema refresh (FR-11, SPEC §9.4).** After Apply the live snapshot moves, so the
+stale banner appears on every schema generated before. If the schema you are looking at
+is among the affected ones it is regenerated right away; the other affected schemas you
+have loaded are listed in a banner with an **Update** button each. A stale schema is
+never presented as current.
+
+The endpoints, all JSON:
+
+```bash
+# start a change over a selection (409: not a git repo, unmerged paths, or a change already open)
+curl -s http://127.0.0.1:4319/api/change -H 'content-type: application/json' \
+  -d '{"nodeIds":["L3:L4:root/app/logging"],"edgeIds":[],"task":"add a request id to every log line"}'
+# → {"id":"3f9c1a2b"}
+
+curl -s http://127.0.0.1:4319/api/change/3f9c1a2b            # status, result, files with hunks and outsideLimits,
+                                                             # affected components, checks, startSnapshot
+curl -N http://127.0.0.1:4319/api/change/3f9c1a2b/progress   # SSE: started / activity / done | error | cancelled
+curl -s -X POST http://127.0.0.1:4319/api/change/3f9c1a2b/cancel
+curl -s -X POST http://127.0.0.1:4319/api/change/3f9c1a2b/refine -H 'content-type: application/json' \
+  -d '{"task":"also cover the error path"}'
+curl -s -X POST http://127.0.0.1:4319/api/change/3f9c1a2b/apply -H 'content-type: application/json' \
+  -d '{"confirmOutside":true}'                               # 409 with outsideFiles when confirmation is missing;
+                                                             # 409 when the repository moved or the patch does not apply
+curl -s -X POST http://127.0.0.1:4319/api/change/3f9c1a2b/discard
+```
+
+`400` for a malformed body, `404` for an unknown id, `409` when no repository is open,
+`501` when the server has no change agent, `502` when the agent fails.
+
+Two things to know: `git worktree add` writes worktree metadata into your repository's
+`.git` (removed again on apply or discard; `git worktree prune` cleans up after a crash),
+and the changes live in memory — restarting the server forgets them, and a worktree left
+under `~/.softscope/changes` has to be removed by hand (`git worktree prune` in the
+repository, then delete the directory). With `SOFTSCOPE_FAKE_AGENT=1` the change agent is
+faked too: it appends a comment carrying your instruction to the first selected file, so
+the whole flow can be clicked through without tokens.
+
 ## Requirements
 
 - **Node 22** or newer.
@@ -114,7 +220,8 @@ repository is open.
 Analysis is **read-only**: the agent session is given `Read`, `Grep` and `Glob` as its
 only tools, so no write or shell tool is offered to the model at all, and the analyzed
 repository's own `CLAUDE.md`, settings and MCP servers are not loaded into the session
-so they cannot steer the analysis.
+so they cannot steer the analysis. Changes are made by a separate session in an isolated
+worktree, never in your repository (see [Editing and verifying](#editing-and-verifying)).
 
 ## Running it
 
@@ -153,12 +260,14 @@ index alone. It marks every relation unverified, because it read no code.
 | ---------------------- | ---------------------- | ---------------------------------------------------- |
 | `SOFTSCOPE_PORT`       | `4319`                 | Port on `127.0.0.1`.                                 |
 | `SOFTSCOPE_CACHE_DIR`  | `~/.softscope/cache`   | Where agent results are cached.                      |
-| `SOFTSCOPE_MODEL`      | the Claude Code default | Model for the analysis agent.                        |
-| `SOFTSCOPE_FAKE_AGENT` | unset                  | `1` replaces Claude with the index-derived fake.      |
+| `SOFTSCOPE_WORK_DIR`   | `~/.softscope/changes` | Where the change worktrees are created.              |
+| `SOFTSCOPE_MODEL`      | the Claude Code default | Model for the analysis and change agents.            |
+| `SOFTSCOPE_FAKE_AGENT` | unset                  | `1` replaces Claude with the index-derived fake (and a fake change agent). |
 | `SOFTSCOPE_NO_OPEN`    | unset                  | `1` does not open the browser on start.              |
 
-The cache lives outside the analyzed repository and SoftZoom never writes into the
-repository it is looking at. Delete `~/.softscope/cache` to drop every cached schema.
+The cache and the change worktrees live outside the analyzed repository; SoftZoom writes
+into the repository it is looking at only when you press Apply. Delete
+`~/.softscope/cache` to drop every cached schema.
 
 ## Layout
 
@@ -166,9 +275,11 @@ repository it is looking at. Delete `~/.softscope/cache` to drop every cached sc
 src/shared/     graph model, agent reply contract, HTTP types — used by server, UI and tests
 src/server/
   indexer/      cheap, LLM-free index: file list, packages, tsconfig paths, import graph
-  agent/        SchemaAgent interface, the claude-agent-sdk implementation, prompts, fake
+  agent/        SchemaAgent and ChangeAgent interfaces, claude-agent-sdk implementations, prompts, fakes
+  change/       worktree isolation, check runner, the change manager (diff, limits, apply, discard)
   validation/   evidence checking: files and line ranges must exist in the repository
   cache/        disk cache keyed by (repository state, agent, level, scope)
+  jobs.ts       running agent calls with buffered progress and cancel, shared by generation and changes
   session.ts    one open repository: cache -> agent -> validation, lazy per scope
   http/         the local API
 src/web/        React + Vite UI, React Flow canvas with a dagre layout

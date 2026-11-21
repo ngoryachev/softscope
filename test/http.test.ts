@@ -7,7 +7,7 @@ import { FakeSchemaAgent } from '../src/server/agent/fake';
 import { RepoSession } from '../src/server/session';
 import type { ContextResponse, FileResponse, GraphResponse, RepoState } from '../src/shared/api';
 import type { Snapshot } from '../src/shared/graph';
-import { agentGraph, cleanupTemps, commitAll, copyFixtureAsGitRepo, tempCache } from './helpers';
+import { agentGraph, cleanupTemps, commitAll, copyFixtureAsGitRepo, sseEvents, tempCache, waitFor } from './helpers';
 
 afterAll(cleanupTemps);
 
@@ -225,21 +225,6 @@ describe('/api/graph', () => {
 
 const graphUrl = (level: string, scopeId: string, extra = '') =>
   `/api/graph${extra}?level=${level}&scope=${encodeURIComponent(scopeId)}`;
-
-/** Polls `condition` until it holds; the agent is reached only after a few awaited ticks. */
-async function waitFor(condition: () => boolean, timeoutMs = 2000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!condition()) {
-    if (Date.now() > deadline) throw new Error('waitFor: condition not met in time');
-    await new Promise((r) => setTimeout(r, 5));
-  }
-}
-
-const sseEvents = (body: string) =>
-  body
-    .split('\n')
-    .filter((line) => line.startsWith('data: '))
-    .map((line) => JSON.parse(line.slice('data: '.length)) as { type: string; [k: string]: unknown });
 
 describe('/api/graph/progress and /api/graph/cancel', () => {
   it('streams the started, activity and done events of a running generation', async () => {

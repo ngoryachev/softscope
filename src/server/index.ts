@@ -10,9 +10,12 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { ClaudeSchemaAgent } from './agent/claude';
+import { ClaudeChangeAgent } from './agent/claude-change';
 import { FakeSchemaAgent, indexDerivedReply } from './agent/fake';
-import type { SchemaAgent } from './agent/types';
+import { FakeChangeAgent } from './agent/fake-change';
+import type { ChangeAgent, SchemaAgent } from './agent/types';
 import { FileCache, defaultCacheRoot } from './cache/file-cache';
+import { defaultWorkDir } from './change/workspace';
 import { createApp, mountWebUi } from './http/app';
 import { RepoSession } from './session';
 
@@ -44,23 +47,36 @@ function buildAgent(): SchemaAgent {
   });
 }
 
+function buildChangeAgent(): ChangeAgent {
+  if (process.env.SOFTSCOPE_FAKE_AGENT === '1') return new FakeChangeAgent();
+  const model = process.env.SOFTSCOPE_MODEL;
+  return new ClaudeChangeAgent({
+    ...(model ? { model } : {}),
+    onProgress: ({ tool, detail }) => {
+      process.stdout.write(`  change ${tool} ${detail}\n`);
+    },
+  });
+}
+
 async function main(): Promise<void> {
   const [pathArg] = process.argv.slice(2);
   const port = Number(process.env.SOFTSCOPE_PORT ?? 4319);
   const agent = buildAgent();
+  const changeAgent = buildChangeAgent();
   const cache = new FileCache();
+  const workDir = defaultWorkDir();
 
   let session: RepoSession | undefined;
   if (pathArg) {
     try {
-      session = new RepoSession(resolve(pathArg), { agent, cache });
+      session = new RepoSession(resolve(pathArg), { agent, cache, changeAgent, workDir });
     } catch (err) {
       process.stderr.write(`Cannot open ${pathArg}: ${err instanceof Error ? err.message : String(err)}\n`);
       process.exit(1);
     }
   }
 
-  const { app } = createApp({ agent, cache, ...(session ? { session } : {}) });
+  const { app } = createApp({ agent, cache, changeAgent, workDir, ...(session ? { session } : {}) });
   const distDir = join(projectRoot, 'dist', 'web');
   const hasUi = await mountWebUi(app, distDir);
 
@@ -72,6 +88,7 @@ async function main(): Promise<void> {
         `  repository: ${session ? session.repoPath : '(enter a path in the UI)'}`,
         `  agent:      ${agent.name}`,
         `  cache:      ${defaultCacheRoot()}`,
+        `  changes:    ${workDir}`,
         hasUi ? '' : `  UI:         not built — run "npm run build" (looked in ${distDir})`,
         '',
       ]

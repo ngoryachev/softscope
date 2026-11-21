@@ -9,6 +9,7 @@ import { createElement as h, type ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { App } from '../src/web/App';
 import { Breadcrumbs } from '../src/web/components/Breadcrumbs';
+import { ChangePanel } from '../src/web/components/ChangePanel';
 import { ContextPanel } from '../src/web/components/ContextPanel';
 import { FileViewer } from '../src/web/components/FileViewer';
 import { GenerationProgress, formatElapsed } from '../src/web/components/GenerationProgress';
@@ -16,7 +17,7 @@ import { GraphCanvas } from '../src/web/components/GraphCanvas';
 import { Inspector } from '../src/web/components/Inspector';
 import { RepoPicker } from '../src/web/components/RepoPicker';
 import { SnapshotBar } from '../src/web/components/SnapshotBar';
-import type { RepoState } from '../src/shared/api';
+import type { ChangeStatus, RepoState } from '../src/shared/api';
 import type { GraphView, Snapshot } from '../src/shared/graph';
 
 const snapshot: Snapshot = {
@@ -84,6 +85,7 @@ const state: RepoState = {
   snapshot,
   generatableLevels: ['L4', 'L3', 'L2'],
   fakeAgent: true,
+  changeAgent: 'fake',
 };
 
 /** An L3 view of "server" with two subsystems, and the L2 of one of them. */
@@ -493,5 +495,186 @@ describe('context panel — more', () => {
     expect(html).toContain('L4 · Applications');
     expect(html).toContain('0 files');
     expect(html).toContain('Copy as JSON');
+  });
+});
+
+describe('context panel — Run', () => {
+  const panel = (over: { runDisabledReason?: string | null; withRun?: boolean; empty?: boolean } = {}) =>
+    render(
+      h(ContextPanel, {
+        views: [view, l3View],
+        currentView: l3View,
+        basket: over.empty ? emptyBasket : { nodeIds: new Set(['srv']), edgeIds: new Set<string>() },
+        live: snapshot,
+        onRemove: noop,
+        onClear: noop,
+        onExpand: noop,
+        onOpenEvidence: noop,
+        onFocus: noop,
+        ...(over.withRun === false ? {} : { onRun: noop, runDisabledReason: over.runDisabledReason ?? null }),
+      }),
+    );
+  const runButton = (html: string) => /<button[^>]*>Run<\/button>/.exec(html)?.[0] ?? '';
+
+  it('offers an instruction field and a Run button that waits for an instruction', () => {
+    const html = panel();
+    expect(html).toContain('Instruction');
+    expect(html).toContain('sz-run-task');
+    // Rendered without a typed instruction: disabled, but not because of the repository.
+    expect(runButton(html)).toContain('disabled');
+    expect(html).toContain('isolated copy');
+    expect(html).not.toContain('git repository');
+  });
+
+  it('explains why Run is disabled: no git repository, or a change already open', () => {
+    const noGit = panel({ runDisabledReason: 'Changes need a git repository: this directory is not one.' });
+    expect(runButton(noGit)).toContain('disabled');
+    expect(noGit).toContain('Changes need a git repository');
+    expect(panel({ runDisabledReason: 'A change is already open; apply or discard it first.' })).toContain('already open');
+    expect(panel({ withRun: false })).not.toContain('>Run<');
+    // With an empty basket the Run section is not shown at all (the panel shows how to select).
+    expect(panel({ empty: true })).not.toContain('>Run<');
+  });
+});
+
+describe('change panel', () => {
+  const baseChange: ChangeStatus = {
+    id: 'abc12345',
+    status: 'done',
+    task: 'add a request id to every log line',
+    history: [{ task: 'add a request id to every log line', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), result: null }],
+    context: {
+      task: 'add a request id to every log line',
+      nodes: [],
+      files: [],
+      size: { files: 0, lines: 0 },
+      relations: { internal: [], external: [] },
+      snapshots: [],
+      warnings: [],
+      stale: false,
+      limits: { paths: ['src/util'], note: '' },
+    },
+    startSnapshot: snapshot,
+    workspaceDir: '/tmp/work/abc12345',
+    result: {
+      summary: 'Prefixed every log call with the request id.',
+      changedFiles: ['src/util/log.ts', 'src/index.ts'],
+      checks: [],
+      scopeExpansion: { needed: true, reason: 'the HTTP handler must pass the id', suggestedPaths: ['src/server/http.ts'] },
+    },
+    files: [
+      {
+        path: 'src/util/log.ts',
+        oldPath: 'src/util/log.ts',
+        status: 'modified',
+        binary: false,
+        outsideLimits: false,
+        hunks: [
+          {
+            header: '@@ -1,2 +1,3 @@',
+            oldStart: 1,
+            newStart: 1,
+            lines: [
+              { type: ' ', text: 'export function log(msg: string) {' },
+              { type: '-', text: '  console.log(msg);' },
+              { type: '+', text: '  console.log(`[${requestId()}] ${msg}`);' },
+            ],
+          },
+        ],
+      },
+      { path: 'src/index.ts', oldPath: 'src/index.ts', status: 'modified', binary: false, outsideLimits: true, hunks: [] },
+    ],
+    affected: [
+      { nodeId: 'srv', title: 'server', level: 'L4', scope: view.scope, files: ['src/util/log.ts'] },
+      { nodeId: 'L3:L4:root/server/http', title: 'http', level: 'L3', scope: l3Scope, files: ['src/index.ts'] },
+    ],
+    affectedViews: [view.scope, l3Scope],
+    checks: [
+      { name: 'typecheck', command: 'npm run typecheck', ok: true, exitCode: 0, outputTail: 'typecheck ok', timedOut: false },
+      { name: 'lint', command: 'npm run lint', ok: false, exitCode: 1, outputTail: 'lint failed: src/util/log.ts', timedOut: false },
+    ],
+    checkCommands: ['npm run typecheck', 'npm run lint'],
+    startedAt: new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+  };
+
+  const panel = (change: ChangeStatus, over: Partial<Parameters<typeof ChangePanel>[0]> = {}) =>
+    render(
+      h(ChangePanel, {
+        change,
+        activity: [],
+        runStartedAt: null,
+        busy: false,
+        error: null,
+        onCancel: noop,
+        onRefine: noop,
+        onApply: noop,
+        onDiscard: noop,
+        onOpenView: noop,
+        onClose: noop,
+        ...over,
+      }),
+    );
+
+  it('shows the summary, the scope callout, the diff with highlighted lines, the outside badge, components and checks', () => {
+    const html = panel(baseChange);
+    expect(html).toContain('ready to review');
+    expect(html).toContain('add a request id to every log line');
+    expect(html).toContain('Prefixed every log call with the request id.');
+    expect(html).toContain('Needs a wider scope');
+    expect(html).toContain('the HTTP handler must pass the id');
+    expect(html).toContain('<code>src/server/http.ts</code>');
+    expect(html).toContain('sz-diff-line-add');
+    expect(html).toContain('sz-diff-line-del');
+    expect(html).toContain('console.log(msg);');
+    expect(html).toContain('@@ -1,2 +1,3 @@');
+    expect(html).toContain('outside selected area');
+    expect(html).toContain('sz-diff-outside');
+    expect(html).toContain('Applying asks for confirmation');
+    expect(html).toContain('Affected components');
+    expect(html).toContain('L4 · demo');
+    expect(html).toContain('L3 · server');
+    expect(html).toContain('<strong>server</strong>');
+    expect(html).toContain('1 of 2 failed');
+    expect(html).toContain('npm run lint');
+    expect(html).toContain('lint failed: src/util/log.ts'); // failed output is open by default
+    expect(html).toContain('>passed<');
+    expect(html).toContain('Apply to working tree');
+    expect(html).toContain('>Discard<');
+    expect(html).toContain('>Refine<');
+    expect(html).not.toContain('>Cancel<');
+  });
+
+  it('shows progress and a Cancel button while running, without diff or actions', () => {
+    const startedAt = new Date(Date.now() - 30_000).toISOString();
+    const html = panel(
+      { ...baseChange, status: 'running', result: null, files: [], checks: [], affected: [], affectedViews: [] },
+      { runStartedAt: startedAt, activity: [{ tool: 'Edit', detail: 'src/util/log.ts', at: startedAt }] },
+    );
+    expect(html).toContain('>running<');
+    expect(html).toContain('isolated copy');
+    expect(html).toMatch(/0:3\d elapsed/);
+    expect(html).toContain('>Edit</span> src/util/log.ts');
+    expect(html).toContain('>Cancel<');
+    expect(html).not.toContain('Apply to working tree');
+    expect(html).not.toContain('>Refine<');
+  });
+
+  it('reports an applied change with a Close button, a failed one with its error, and a cancelled one', () => {
+    const applied = panel({ ...baseChange, status: 'applied' });
+    expect(applied).toContain('>applied<');
+    expect(applied).toContain('Applied to your working tree');
+    expect(applied).toContain('>Close<');
+    expect(applied).not.toContain('Apply to working tree');
+
+    const failed = panel({ ...baseChange, status: 'failed', error: 'the agent stopped: error_max_turns' });
+    expect(failed).toContain('>failed<');
+    expect(failed).toContain('error_max_turns');
+    expect(failed).toContain('>Discard<');
+
+    const cancelled = panel({ ...baseChange, status: 'cancelled', files: [], checks: [] });
+    expect(cancelled).toContain('Cancelled.');
+    expect(cancelled).toContain('No files changed.');
+    expect(panel(baseChange, { error: 'The repository moved since the change started.' })).toContain('repository moved');
   });
 });

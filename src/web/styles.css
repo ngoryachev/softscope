@@ -693,3 +693,295 @@ pre {
   font-family: ui-monospace, monospace;
   font-size: 12px;
 }
+
+/* ---- Prompt → Change → Verify ------------------------------------------------------ */
+
+.sz-run-task,
+.sz-refine textarea {
+  width: 100%;
+  font: inherit;
+  font-size: 13px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  resize: vertical;
+}
+
+.sz-run-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.sz-run-reason {
+  font-size: 12px;
+}
+
+.sz-button-primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.sz-button-primary:disabled {
+  background: #a9bfe3;
+  border-color: #a9bfe3;
+  color: #fff;
+}
+
+.sz-button-small {
+  padding: 1px 8px;
+  font-size: 12px;
+}
+
+.sz-change-panel {
+  flex: 1 1 50%;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 14px 16px;
+}
+
+.sz-change-panel h2 {
+  font-size: 15px;
+  margin: 0;
+}
+
+.sz-change-panel h3 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 14px 0 4px;
+}
+
+.sz-change-panel p {
+  margin: 4px 0;
+}
+
+.sz-change-status {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  margin-left: 6px;
+}
+
+.sz-change-status-running {
+  background: #eef3fb;
+  color: var(--accent);
+}
+
+.sz-change-status-done {
+  background: #e7f3e8;
+  color: #37693a;
+}
+
+.sz-change-status-failed,
+.sz-change-status-cancelled {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.sz-change-status-applied {
+  background: #e7f3e8;
+  color: #37693a;
+}
+
+.sz-change-task {
+  white-space: pre-wrap;
+}
+
+.sz-change-progress {
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: #eef3fb;
+  border: 1px solid #c5d5ee;
+  border-radius: 6px;
+}
+
+.sz-change-error {
+  padding: 6px 10px;
+  background: var(--warn-bg);
+  border: 1px solid #e3cf9c;
+  border-radius: 6px;
+}
+
+.sz-callout {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #e3cf9c;
+  background: var(--warn-bg);
+}
+
+.sz-callout h3 {
+  color: var(--warn);
+  margin-top: 0;
+}
+
+/* The diff: one block per file, lines coloured by their sign. */
+.sz-diff-file {
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.sz-diff-outside {
+  border-color: #e3cf9c;
+}
+
+.sz-diff-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+
+.sz-diff-toggle code {
+  font-weight: 600;
+}
+
+.sz-diff-counts {
+  font-variant-numeric: tabular-nums;
+}
+
+.sz-diff-added {
+  color: #2a7a3b;
+}
+
+.sz-diff-removed {
+  color: #b33a3a;
+}
+
+.sz-diff {
+  margin: 0;
+  padding: 4px 0;
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.sz-diff-hunk {
+  padding: 1px 8px;
+  color: var(--accent);
+  background: #f3f6fb;
+}
+
+.sz-diff-line {
+  display: flex;
+  white-space: pre;
+}
+
+.sz-diff-sign {
+  flex: 0 0 18px;
+  text-align: center;
+  color: var(--muted);
+  user-select: none;
+}
+
+.sz-diff-text {
+  flex: 1 1 auto;
+  padding-right: 8px;
+}
+
+.sz-diff-line-add {
+  background: #e6ffed;
+}
+
+.sz-diff-line-add .sz-diff-sign {
+  color: #2a7a3b;
+}
+
+.sz-diff-line-del {
+  background: #ffeef0;
+}
+
+.sz-diff-line-del .sz-diff-sign {
+  color: #b33a3a;
+}
+
+.sz-affected-group {
+  margin: 6px 0;
+}
+
+.sz-affected {
+  margin: 2px 0 0;
+  padding-left: 16px;
+}
+
+.sz-checks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sz-check {
+  margin: 6px 0;
+}
+
+.sz-check-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sz-check-output {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  max-height: 16em;
+  overflow: auto;
+  background: #1d2430;
+  color: #e6e9ef;
+  border-radius: 6px;
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+.sz-refine button {
+  margin-top: 6px;
+}
+
+.sz-change-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.sz-confirm {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid #e3cf9c;
+  background: var(--warn-bg);
+  border-radius: 6px;
+}
+
+.sz-change-applied {
+  margin-top: 12px;
+  color: #37693a;
+}
+
+/* Schemas that describe code an applied change touched, with an Update button each (FR-11). */
+.sz-affected-banner {
+  flex: 0 0 auto;
+  padding: 8px 14px;
+  font-size: 13px;
+  background: #eef3fb;
+  border-bottom: 1px solid #c5d5ee;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sz-affected-view {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}

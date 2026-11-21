@@ -5,7 +5,8 @@
  * Generation is always lazy and scoped (SPEC §4.4): nothing is generated until the user
  * opens that scope, and opening one application never touches its neighbours.
  */
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
+import { homedir } from 'node:os';
 import { statSync } from 'node:fs';
 import type { AgentGraph } from '../shared/agent-schema';
 import type { GraphResponse, ProgressEvent, RepoState } from '../shared/api';
@@ -24,11 +25,13 @@ import {
   type Snapshot,
 } from '../shared/graph';
 import { generatableLevels, supportsLevel } from './agent/prompts';
-import type { SchemaAgent, SiblingRef } from './agent/types';
+import type { ChangeAgent, SchemaAgent, SiblingRef } from './agent/types';
 import type { CacheKey, FileCache } from './cache/file-cache';
+import { ChangeManager } from './change/manager';
 import { buildIndex, type RepoIndex } from './indexer/index';
-import { isGitRepo, repoSnapshot, sameState } from './indexer/git';
+import { isGitRepo as isGitRepoAt, repoSnapshot, sameState } from './indexer/git';
 import { listFiles } from './indexer/files';
+import { JobRegistry } from './jobs';
 import { validateView } from './validation/validate';
 
 /** What the cache stores: the agent's raw reply plus the state it describes. */
@@ -66,24 +69,15 @@ export class GenerationCancelledError extends Error {
   }
 }
 
-/** Activity events kept for a subscriber that connects while the agent is already working. */
-const PROGRESS_BUFFER = 40;
-
 export type ProgressListener = (event: ProgressEvent) => void;
 
-/**
- * One running agent call. Shared by every request that joined the same scope, so
- * cancelling it affects all of them — this is a single-user local tool.
- */
-interface GenerationJob {
-  level: Level;
-  scopeId: string;
-  startedAt: string;
-  controller: AbortController;
-  /** `started` first, then the most recent activity; terminal events are not buffered. */
-  events: ProgressEvent[];
-  listeners: Set<ProgressListener>;
-  finished: boolean;
+export interface SessionDeps {
+  agent: SchemaAgent;
+  cache: FileCache;
+  /** Absent: `POST /api/change` answers that no change agent is configured. */
+  changeAgent?: ChangeAgent;
+  /** Parent directory of the change worktrees (`SOFTSCOPE_WORK_DIR`). */
+  workDir?: string;
 }
 
 export interface GraphRequest {
@@ -99,12 +93,14 @@ export class RepoSession {
   private readonly scopes = new Map<string, ScopeRef>();
   private readonly views = new Map<string, GraphView>();
   private readonly inFlight = new Map<string, Promise<GraphResponse>>();
-  private readonly jobs = new Map<string, GenerationJob>();
+  private readonly jobs = new JobRegistry<ProgressEvent>();
   private cachedIndex: RepoIndex | null = null;
+  /** Prompt → Change → Verify over this repository (SPEC §6.4, §6.5). */
+  readonly changes: ChangeManager;
 
   constructor(
     repoPath: string,
-    private readonly deps: { agent: SchemaAgent; cache: FileCache },
+    private readonly deps: SessionDeps,
   ) {
     this.repoPath = resolve(repoPath);
     const st = statSync(this.repoPath);
@@ -112,11 +108,24 @@ export class RepoSession {
     if (this.deps.cache.root.startsWith(`${this.repoPath}/`)) {
       throw new Error('The cache directory must not live inside the analyzed repository.');
     }
+    this.changes = new ChangeManager(this, {
+      ...(deps.changeAgent ? { agent: deps.changeAgent } : {}),
+      workDir: deps.workDir ?? join(homedir(), '.softscope', 'changes'),
+    });
+  }
+
+  isGitRepo(): boolean {
+    return isGitRepoAt(this.repoPath);
+  }
+
+  /** Repository-relative directories of the packages the index knows, the root included. */
+  packageDirs(): string[] {
+    return this.index().packages.packages.map((p) => p.dir);
   }
 
   /** The live repository state, re-read on every call: it is what `stale` compares to. */
   liveSnapshot(): Snapshot {
-    if (isGitRepo(this.repoPath)) return repoSnapshot(this.repoPath);
+    if (this.isGitRepo()) return repoSnapshot(this.repoPath);
     // Without git the state id is a fingerprint of the file list, so the list has to be
     // read now rather than taken from the last index: a file added after that index
     // would never move the state id, and the cached schema would be served as current
@@ -145,6 +154,7 @@ export class RepoSession {
       snapshot: index.snapshot,
       generatableLevels: generatableLevels(),
       fakeAgent: this.deps.agent.name === 'fake',
+      changeAgent: this.deps.changeAgent?.name ?? null,
     };
   }
 
@@ -214,7 +224,12 @@ export class RepoSession {
     requestSignal: AbortSignal | undefined,
     cacheKey: CacheKey,
   ): Promise<CachedGeneration> {
-    const job = this.startJob(scope);
+    const job = this.jobs.start(key(scope.level, scope.id), (startedAt) => ({
+      type: 'started',
+      level: scope.level,
+      scopeId: scope.id,
+      startedAt,
+    }));
     const onRequestAbort = () => job.controller.abort();
     if (requestSignal?.aborted) onRequestAbort();
     else requestSignal?.addEventListener('abort', onRequestAbort, { once: true });
@@ -226,7 +241,7 @@ export class RepoSession {
         ...(parent ? { parent } : {}),
         signal: job.controller.signal,
         onProgress: ({ tool, detail }) =>
-          this.emit(job, { type: 'activity', tool, detail, at: new Date().toISOString() }),
+          this.jobs.emit(job, { type: 'activity', tool, detail, at: new Date().toISOString() }),
       });
       if (job.controller.signal.aborted) throw new GenerationCancelledError(scope.level, scope.id);
       const fresh: CachedGeneration = {
@@ -237,16 +252,16 @@ export class RepoSession {
         raw,
       };
       this.deps.cache.set(cacheKey, fresh);
-      this.finishJob(job, { type: 'done', level: scope.level, scopeId: scope.id, at: new Date().toISOString() });
+      this.jobs.finish(job, { type: 'done', level: scope.level, scopeId: scope.id, at: new Date().toISOString() });
       return fresh;
     } catch (err) {
       const at = new Date().toISOString();
       if (job.controller.signal.aborted) {
-        this.finishJob(job, { type: 'cancelled', level: scope.level, scopeId: scope.id, at });
+        this.jobs.finish(job, { type: 'cancelled', level: scope.level, scopeId: scope.id, at });
         throw new GenerationCancelledError(scope.level, scope.id);
       }
       const message = err instanceof Error ? err.message : String(err);
-      this.finishJob(job, { type: 'error', level: scope.level, scopeId: scope.id, at, message });
+      this.jobs.finish(job, { type: 'error', level: scope.level, scopeId: scope.id, at, message });
       throw err;
     } finally {
       requestSignal?.removeEventListener('abort', onRequestAbort);
@@ -272,10 +287,7 @@ export class RepoSession {
 
   /** Aborts the running generation of a scope. False when nothing is running for it. */
   cancel(level: Level, scopeId: string): boolean {
-    const job = this.jobs.get(key(level, scopeId));
-    if (!job || job.finished) return false;
-    job.controller.abort();
-    return true;
+    return this.jobs.cancel(key(level, scopeId));
   }
 
   /**
@@ -283,49 +295,7 @@ export class RepoSession {
    * then live ones follow until a terminal event. Null when nothing is running.
    */
   subscribe(level: Level, scopeId: string, listener: ProgressListener): (() => void) | null {
-    const job = this.jobs.get(key(level, scopeId));
-    if (!job || job.finished) return null;
-    for (const event of job.events) listener(event);
-    job.listeners.add(listener);
-    return () => {
-      job.listeners.delete(listener);
-    };
-  }
-
-  private startJob(scope: ScopeRef): GenerationJob {
-    const startedAt = new Date().toISOString();
-    const job: GenerationJob = {
-      level: scope.level,
-      scopeId: scope.id,
-      startedAt,
-      controller: new AbortController(),
-      events: [],
-      listeners: new Set(),
-      finished: false,
-    };
-    // A refresh replaces the job of the plain request it overlaps; `finishJob` only
-    // removes the entry that still belongs to the finishing job.
-    this.jobs.set(key(scope.level, scope.id), job);
-    this.emit(job, { type: 'started', level: scope.level, scopeId: scope.id, startedAt });
-    return job;
-  }
-
-  private emit(job: GenerationJob, event: ProgressEvent): void {
-    if (job.finished) return;
-    job.events.push(event);
-    // Keep `started` and the most recent activity; a late subscriber does not need the
-    // whole history, only enough to see what the agent is doing now.
-    if (job.events.length > PROGRESS_BUFFER + 1) job.events.splice(1, job.events.length - PROGRESS_BUFFER - 1);
-    for (const listener of job.listeners) listener(event);
-  }
-
-  private finishJob(job: GenerationJob, event: ProgressEvent): void {
-    if (job.finished) return;
-    for (const listener of job.listeners) listener(event);
-    job.finished = true;
-    job.listeners.clear();
-    const id = key(job.level, job.scopeId);
-    if (this.jobs.get(id) === job) this.jobs.delete(id);
+    return this.jobs.subscribe(key(level, scopeId), listener);
   }
 
   /**

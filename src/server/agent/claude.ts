@@ -46,9 +46,10 @@ export function repoRelative(path: string, repoPath?: string): string {
 }
 
 /**
- * The target of a tool call in the words a user understands: a path, a pattern. The SDK
- * reports absolute paths; with `repoPath` the file paths of Read and Grep are shown
- * relative to the analyzed repository. Patterns and other details are left alone.
+ * The target of a tool call in the words a user understands: a path, a pattern, a
+ * command. The SDK reports absolute paths; with `repoPath` the file paths of Read, Grep
+ * and the edit tools are shown relative to the analyzed repository (or, for the change
+ * agent, to its worktree). Patterns, commands and other details are left alone.
  */
 export function describeToolInput(tool: string, input: unknown, repoPath?: string): string {
   const record = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
@@ -65,6 +66,12 @@ export function describeToolInput(tool: string, input: unknown, repoPath?: strin
       }
       case 'Glob':
         return str('pattern');
+      case 'Edit':
+      case 'Write':
+      case 'MultiEdit':
+        return rel(str('file_path') || str('path'));
+      case 'Bash':
+        return str('command') || str('description');
       default:
         return str('file_path') || str('path') || str('pattern') || str('command');
     }
@@ -73,7 +80,7 @@ export function describeToolInput(tool: string, input: unknown, repoPath?: strin
 }
 
 /** JSON object embedded in a text reply, as a fallback when structured output is absent. */
-function extractJsonObject(text: string): unknown {
+export function extractJsonObject(text: string): unknown {
   const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text);
   const body = fenced?.[1] ?? text;
   const start = body.indexOf('{');

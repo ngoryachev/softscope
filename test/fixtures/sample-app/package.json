@@ -8,6 +8,8 @@
   "bin": { "sample": "src/cli.ts" },
   "scripts": {
     "start": "node src/index.ts",
+    "typecheck": "node -e \"console.log('typecheck ok')\"",
+    "lint": "node -e \"console.error('lint failed: src/util/log.ts'); process.exit(1)\"",
     "test": "node --test"
   },
   "dependencies": {
