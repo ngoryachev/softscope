@@ -24,6 +24,8 @@ export interface RepoIndex {
   imports: ImportGraph;
   /** Files that look like a process entry point: bin scripts, index/main/server modules. */
   entryPoints: string[];
+  /** What the index itself could not establish; shown in the view next to the agent's notes. */
+  notes: string[];
 }
 
 const ENTRY_BASENAMES = new Set([
@@ -63,7 +65,7 @@ function findEntryPoints(index: Pick<RepoIndex, 'codeFiles' | 'packages' | 'impo
 }
 
 export function buildIndex(root: string): RepoIndex {
-  const { files, codeFiles, source, truncated } = listFiles(root);
+  const { files, codeFiles, source, truncated, ignoredByGit } = listFiles(root);
   const packages = indexPackages(root, files);
   const tsconfigs = indexTsconfigs(root, files);
   const imports = buildImportGraph(root, codeFiles, files, packages, tsconfigs);
@@ -80,8 +82,19 @@ export function buildIndex(root: string): RepoIndex {
     tsconfigs,
     imports,
     entryPoints: [],
+    notes: [],
   };
   index.entryPoints = findEntryPoints(index);
+  if (ignoredByGit) {
+    index.notes.push(
+      'This directory lies inside a git repository that excludes it, so git tracks none ' +
+        'of its files. The file list comes from a filesystem walk instead, and the branch ' +
+        'and commit shown are the enclosing repository\'s.',
+    );
+  }
+  if (truncated) {
+    index.notes.push(`Only the first ${files.length} files were indexed; the listing is incomplete.`);
+  }
   return index;
 }
 

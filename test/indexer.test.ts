@@ -1,11 +1,12 @@
 import { afterAll, describe, expect, it } from 'vitest';
-import { appendFileSync, utimesSync } from 'node:fs';
+import { appendFileSync, mkdirSync, utimesSync, writeFileSync } from 'node:fs';
 import { buildIndex } from '../src/server/indexer/index';
 import { listFiles } from '../src/server/indexer/files';
 import { parseJsonc } from '../src/server/indexer/tsconfig';
 import { repoSnapshot } from '../src/server/indexer/git';
 import { rootScope } from '../src/shared/graph';
 import { summarizeForAgent } from '../src/server/indexer/index';
+import { join } from 'node:path';
 import { cleanupTemps, copyFixture, copyFixtureAsGitRepo } from './helpers';
 
 afterAll(cleanupTemps);
@@ -27,11 +28,31 @@ describe('file listing', () => {
 
   it('uses git ls-files inside a git repository', () => {
     const repo = copyFixtureAsGitRepo();
-    const { files, source } = listFiles(repo);
+    const { files, source, ignoredByGit } = listFiles(repo);
 
     expect(source).toBe('git');
+    expect(ignoredByGit).toBe(false);
     expect(files).toContain('src/util/log.ts');
     expect(files.some((f) => f.includes('node_modules'))).toBe(false);
+  });
+
+  it('walks a directory that its enclosing repository excludes, and says so', () => {
+    // git lists nothing for such a directory, which used to read as an empty project.
+    const outer = copyFixtureAsGitRepo();
+    const inner = join(outer, 'scratch');
+    mkdirSync(join(inner, 'src'), { recursive: true });
+    writeFileSync(join(inner, 'package.json'), '{ "name": "scratch" }\n', 'utf8');
+    writeFileSync(join(inner, 'src/app.ts'), 'export const x = 1;\n', 'utf8');
+    appendFileSync(join(outer, '.git', 'info', 'exclude'), '\nscratch/\n');
+
+    const list = listFiles(inner);
+    expect(list.source).toBe('walk');
+    expect(list.ignoredByGit).toBe(true);
+    expect(list.files).toEqual(['package.json', 'src/app.ts']);
+
+    const index = buildIndex(inner);
+    expect(index.name).toBe('scratch');
+    expect(index.notes.join(' ')).toContain('excludes it');
   });
 });
 

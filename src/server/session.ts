@@ -167,6 +167,8 @@ export class RepoSession {
       snapshot: generation.snapshot,
       raw: generation.raw,
     });
+    // What the index could not establish belongs next to what the agent could not.
+    view.notes = [...index.notes, ...view.notes];
     this.register(view);
     return {
       view,

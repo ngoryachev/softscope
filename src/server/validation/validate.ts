@@ -150,6 +150,9 @@ export function validateView({ repoPath, scope, snapshot, raw }: ValidateOptions
     takenIds.add(id);
     idBySlug.set(node.slug, id);
   }
+  /** How an endpoint is named in an issue: the title the agent gave it, as elsewhere. */
+  const nameOfSlug = (slug: string) =>
+    raw.nodes.find((n) => n.slug === slug)?.title || idBySlug.get(slug) || slug;
 
   const nodes: GraphNode[] = [];
   const kept = new Set<string>();
@@ -216,7 +219,7 @@ export function validateView({ repoPath, scope, snapshot, raw }: ValidateOptions
     if (!from || !to || !kept.has(from) || !kept.has(to)) {
       issues.push({
         kind: 'edge-dropped',
-        message: `Edge ${edge.from} -> ${edge.to} (${edge.kind}) was dropped: endpoint missing from the validated graph.`,
+        message: `Edge "${nameOfSlug(edge.from)}" -> "${nameOfSlug(edge.to)}" (${edge.kind}) was dropped: endpoint missing from the validated graph.`,
       });
       continue;
     }

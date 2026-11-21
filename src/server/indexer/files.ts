@@ -101,17 +101,27 @@ export interface FileList {
   source: 'git' | 'walk';
   /** The listing hit MAX_FILES and is incomplete. */
   truncated: boolean;
+  /**
+   * The directory sits inside a git repository that excludes it, so git listed nothing
+   * and the walk took over. Worth saying out loud: otherwise the user just sees an
+   * empty graph with no explanation.
+   */
+  ignoredByGit: boolean;
 }
 
 export function listFiles(root: string): FileList {
   const fromGit = isGitRepo(root) ? gitFiles(root) : null;
-  const files = (fromGit ?? walk(root)).sort();
+  // git lists nothing for a directory its repository ignores. Fall back to the walk
+  // instead of reporting an empty project.
+  const walked = fromGit === null || fromGit.length === 0 ? walk(root) : null;
+  const files = (walked ?? fromGit ?? []).sort();
   const capped = files.slice(0, MAX_FILES);
   return {
     files: capped,
     codeFiles: capped.filter(isCodeFile),
-    source: fromGit ? 'git' : 'walk',
+    source: walked === null ? 'git' : 'walk',
     truncated: files.length > capped.length,
+    ignoredByGit: fromGit !== null && fromGit.length === 0 && files.length > 0,
   };
 }
 
