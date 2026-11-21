@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { describeToolInput } from '../src/server/agent/claude';
 import { FakeSchemaAgent, indexDerivedReply } from '../src/server/agent/fake';
 import type { SchemaAgent } from '../src/server/agent/types';
+import { buildPrompt, generatableLevels, supportsLevel } from '../src/server/agent/prompts';
 import { summarizeForAgent } from '../src/server/indexer/index';
 import { GenerationCancelledError, LevelNotSupportedError, RepoSession, ScopeNotFoundError } from '../src/server/session';
 import type { ProgressEvent } from '../src/shared/api';
@@ -423,6 +424,209 @@ describe('lazy L2', () => {
     expect(events.filter((e) => e.type === 'activity')).toMatchObject([{ tool: 'Read', detail: 'packages/core/src/index.ts' }]);
     expect(events.at(-1)?.type).toBe('done');
     expect(agent.calls.at(-1)?.signal?.aborted).toBe(false);
+  });
+});
+
+describe('generation jobs', () => {
+  const l2Progress = (count: number) =>
+    Array.from({ length: count }, (_, i) => ({ tool: 'Read', detail: `packages/core/src/file-${i}.ts` }));
+
+  const slowSession = (delayMs: number, progress?: Record<string, Array<{ tool: string; detail: string }>>) => {
+    agent = new FakeSchemaAgent({
+      replies: { 'L4:root': l4Reply, [`L3:${CORE_ID}`]: coreL3Reply, [`L2:${SCHEMA_ID}`]: schemaL2Reply },
+      strict: true,
+      delayMs,
+      ...(progress ? { progress } : {}),
+    });
+    session = newSession();
+  };
+
+  const cacheEntry = (level: 'L4' | 'L3' | 'L2', scopeId: string) =>
+    cache.get({ repoPath: repo, stateId: session.liveSnapshot().stateId, level, scopeId, agent: 'fake' });
+
+  it('cancelling the parent L3 fails a deep-linked L2 request as cancelled and caches neither level', async () => {
+    slowSession(200);
+    await session.graph({ level: 'L4', scopeId: 'root' });
+
+    const pending = session.graph({ level: 'L2', scopeId: SCHEMA_ID });
+    await waitFor(() => agent.callsFor('L3', CORE_ID) === 1);
+    // The L2 job does not exist yet: the parent level is what is running.
+    expect(session.cancel('L2', SCHEMA_ID)).toBe(false);
+    expect(session.cancel('L3', CORE_ID)).toBe(true);
+
+    await expect(pending).rejects.toThrow(GenerationCancelledError);
+    expect(cacheEntry('L3', CORE_ID)).toBeNull();
+    expect(cacheEntry('L2', SCHEMA_ID)).toBeNull();
+    expect(agent.callsFor('L2', SCHEMA_ID)).toBe(0);
+
+    // Nothing is poisoned: the next request walks down again.
+    const retry = await session.graph({ level: 'L2', scopeId: SCHEMA_ID });
+    expect(retry.cached).toBe(false);
+    expect(agent.callsFor('L3', CORE_ID)).toBe(2);
+    expect(agent.callsFor('L2', SCHEMA_ID)).toBe(1);
+  });
+
+  it('aborting the request signal cancels the job and tells subscribers so', async () => {
+    slowSession(200);
+    await session.graph({ level: 'L4', scopeId: 'root' });
+    await session.graph({ level: 'L3', scopeId: CORE_ID });
+
+    const controller = new AbortController();
+    const events: ProgressEvent[] = [];
+    const pending = session.graph({ level: 'L2', scopeId: SCHEMA_ID, signal: controller.signal });
+    await waitFor(() => agent.callsFor('L2', SCHEMA_ID) === 1);
+    expect(session.subscribe('L2', SCHEMA_ID, (e) => events.push(e))).not.toBeNull();
+    controller.abort();
+
+    await expect(pending).rejects.toThrow(GenerationCancelledError);
+    expect(agent.calls.at(-1)?.signal?.aborted).toBe(true);
+    expect(events.map((e) => e.type)).toEqual(['started', 'cancelled']);
+    expect(cacheEntry('L2', SCHEMA_ID)).toBeNull();
+  });
+
+  it('cancel fails every request that joined the same generation', async () => {
+    slowSession(200);
+    await session.graph({ level: 'L4', scopeId: 'root' });
+    await session.graph({ level: 'L3', scopeId: CORE_ID });
+
+    const a = session.graph({ level: 'L2', scopeId: SCHEMA_ID });
+    const b = session.graph({ level: 'L2', scopeId: SCHEMA_ID });
+    await waitFor(() => agent.callsFor('L2', SCHEMA_ID) === 1);
+    expect(session.cancel('L2', SCHEMA_ID)).toBe(true);
+
+    await expect(a).rejects.toThrow(GenerationCancelledError);
+    await expect(b).rejects.toThrow(GenerationCancelledError);
+    expect(agent.callsFor('L2', SCHEMA_ID)).toBe(1);
+  });
+
+  it('treats a reply that arrives after the abort as cancelled and caches nothing', async () => {
+    const fake = new FakeSchemaAgent({
+      replies: { 'L4:root': l4Reply, [`L3:${CORE_ID}`]: coreL3Reply, [`L2:${SCHEMA_ID}`]: schemaL2Reply },
+      strict: true,
+      delayMs: 150,
+    });
+    agent = fake;
+    // An agent that does not honour the abort signal: the SDK may well keep going for a
+    // while after it is asked to stop. The session, not the agent, decides what counts.
+    const stubborn: SchemaAgent = {
+      name: fake.name,
+      generate(req) {
+        const ignoringAbort = { ...req };
+        delete ignoringAbort.signal;
+        return fake.generate(ignoringAbort);
+      },
+    };
+    session = new RepoSession(repo, { agent: stubborn, cache });
+    await session.graph({ level: 'L4', scopeId: 'root' });
+    await session.graph({ level: 'L3', scopeId: CORE_ID });
+
+    const events: ProgressEvent[] = [];
+    const pending = session.graph({ level: 'L2', scopeId: SCHEMA_ID });
+    await waitFor(() => fake.callsFor('L2', SCHEMA_ID) === 1);
+    session.subscribe('L2', SCHEMA_ID, (e) => events.push(e));
+    expect(session.cancel('L2', SCHEMA_ID)).toBe(true);
+
+    await expect(pending).rejects.toThrow(GenerationCancelledError);
+    expect(events.at(-1)?.type).toBe('cancelled');
+    expect(cacheEntry('L2', SCHEMA_ID)).toBeNull();
+  });
+
+  it('reports an agent failure as an error event and forgets the job', async () => {
+    slowSession(100);
+    await session.graph({ level: 'L4', scopeId: 'root' });
+    await session.graph({ level: 'L3', scopeId: CORE_ID });
+
+    const events: ProgressEvent[] = [];
+    // The strict fake has no reply for the "arithmetic" subsystem, so it fails after its delay.
+    const pending = session.graph({ level: 'L2', scopeId: MATH_ID });
+    await waitFor(() => agent.callsFor('L2', MATH_ID) === 1);
+    session.subscribe('L2', MATH_ID, (e) => events.push(e));
+
+    await expect(pending).rejects.toThrow(/no reply/);
+    expect(events.map((e) => e.type)).toEqual(['started', 'error']);
+    expect(events.at(-1)).toMatchObject({ type: 'error', message: expect.stringContaining('no reply') });
+    expect(session.subscribe('L2', MATH_ID, () => undefined)).toBeNull();
+    expect(session.cancel('L2', MATH_ID)).toBe(false);
+    expect(cacheEntry('L2', MATH_ID)).toBeNull();
+  });
+
+  it('replays the started event and only the most recent activity to a late subscriber', async () => {
+    slowSession(100, { [`L2:${SCHEMA_ID}`]: l2Progress(45) });
+    await session.graph({ level: 'L4', scopeId: 'root' });
+    await session.graph({ level: 'L3', scopeId: CORE_ID });
+
+    const events: ProgressEvent[] = [];
+    const pending = session.graph({ level: 'L2', scopeId: SCHEMA_ID });
+    await waitFor(() => agent.callsFor('L2', SCHEMA_ID) === 1);
+    session.subscribe('L2', SCHEMA_ID, (e) => events.push(e));
+
+    expect(events[0]?.type).toBe('started');
+    const activity = events.filter((e) => e.type === 'activity');
+    expect(activity).toHaveLength(40);
+    expect(activity[0]).toMatchObject({ detail: 'packages/core/src/file-5.ts' });
+    expect(activity.at(-1)).toMatchObject({ detail: 'packages/core/src/file-44.ts' });
+    await pending;
+    expect(events.at(-1)?.type).toBe('done');
+    // A listener that detached is not called again.
+    const late: ProgressEvent[] = [];
+    expect(session.subscribe('L2', SCHEMA_ID, (e) => late.push(e))).toBeNull();
+    expect(late).toEqual([]);
+  });
+
+  it('does not emit a job for a cached view', async () => {
+    slowSession(50);
+    await session.graph({ level: 'L4', scopeId: 'root' });
+    await session.graph({ level: 'L3', scopeId: CORE_ID });
+    await session.graph({ level: 'L2', scopeId: SCHEMA_ID });
+
+    const pending = session.graph({ level: 'L2', scopeId: SCHEMA_ID });
+    expect(session.subscribe('L2', SCHEMA_ID, () => undefined)).toBeNull();
+    expect((await pending).cached).toBe(true);
+  });
+});
+
+describe('L2 prompt', () => {
+  it('hands the agent the subsystem slice, the parent node, the sibling ids and the boundary rules', async () => {
+    await session.graph({ level: 'L4', scopeId: 'root' });
+    await session.graph({ level: 'L3', scopeId: CORE_ID });
+    await session.graph({ level: 'L2', scopeId: SCHEMA_ID });
+    const request = agent.calls.at(-1)!;
+
+    const { system, prompt } = buildPrompt(request);
+    expect(system.length).toBeGreaterThan(0);
+    // Scope and parent.
+    expect(prompt).toContain(`scope: L2 ${SCHEMA_ID} (schema)`);
+    expect(prompt).toContain('scope paths: packages/core/src/index.ts');
+    expect(prompt).toContain('opened the L3 node "schema"');
+    // The sibling list carries the exact ids the agent has to echo in subsystemId.
+    expect(prompt).toContain(`id: ${MATH_ID}`);
+    expect(prompt).toContain('title: arithmetic');
+    expect(prompt).toContain('paths: packages/core/src/math.ts');
+    // The index slice is the subsystem's files, not the repository.
+    expect(prompt).toContain('- packages/core/src/index.ts');
+    expect(prompt).toContain('files in scope: 1 (1 TS/JS)');
+    expect(prompt).not.toContain('packages/ui/src/index.tsx');
+    expect(prompt).not.toContain('src/server/');
+    // SPEC 6.2, 5.1, 5.3 rules are spelled out.
+    expect(prompt).toMatch(/Never describe or detail a neighbouring\s+subsystem/);
+    expect(prompt).toContain('subsystemId');
+    expect(prompt).toContain('memberOf');
+    expect(prompt).toContain('"component-graph"');
+    expect(prompt).toContain('"data-flow"');
+    expect(prompt).toContain('hasDetail=false');
+  });
+
+  it('still builds without a parent, saying no neighbours are known', () => {
+    const index = session.index();
+    const scope = { level: 'L2' as const, id: SCHEMA_ID, label: 'schema', paths: ['packages/core/src/index.ts'] };
+    const { prompt } = buildPrompt({ repoPath: repo, index, scope });
+    expect(prompt).toContain('(none known)');
+    expect(prompt).not.toContain('opened the L3 node');
+  });
+
+  it('has no builder for L1', () => {
+    expect(generatableLevels()).toEqual(['L4', 'L3', 'L2']);
+    expect(supportsLevel('L1')).toBe(false);
   });
 });
 

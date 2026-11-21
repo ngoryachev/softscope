@@ -294,6 +294,52 @@ describe('/api/graph/progress and /api/graph/cancel', () => {
     expect(agent.callsFor('L2', LOGGING_ID)).toBe(2);
   });
 
+  it('ends an open progress stream with the cancelled event and keeps the next request fresh', async () => {
+    const app = build(true, true);
+    await app.request('/api/graph?level=L4&scope=root');
+    await app.request(`/api/graph?level=L3&scope=${encodeURIComponent(APP_ID)}`);
+
+    const pending = app.request(graphUrl('L2', LOGGING_ID));
+    await waitFor(() => agent.callsFor('L2', LOGGING_ID) === 1);
+    // The stream is open (headers sent) before the cancel arrives; its body ends with the cancel.
+    const stream = await app.request(graphUrl('L2', LOGGING_ID, '/progress'));
+    await app.request('/api/graph/cancel', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ level: 'L2', scopeId: LOGGING_ID }),
+    });
+
+    const events = sseEvents(await stream.text());
+    expect(events.map((e) => e.type)).toEqual(['started', 'activity', 'activity', 'cancelled']);
+    expect((await pending).status).toBe(499);
+    // Once the job is gone the stream reports idle rather than hanging.
+    expect(sseEvents(await (await app.request(graphUrl('L2', LOGGING_ID, '/progress'))).text())).toEqual([
+      { type: 'idle', level: 'L2', scopeId: LOGGING_ID },
+    ]);
+  });
+
+  it('streams the error event when the agent fails', async () => {
+    // A strict fake without an L2 reply fails after its delay, the way a broken agent would.
+    const cache = tempCache();
+    agent = new FakeSchemaAgent({ replies: { 'L4:root': l4Reply, [`L3:${APP_ID}`]: l3Reply }, strict: true, delayMs: 300 });
+    const app = createApp({ agent, cache, session: new RepoSession(repo, { agent, cache }) }).app;
+    await app.request('/api/graph?level=L4&scope=root');
+    await app.request(`/api/graph?level=L3&scope=${encodeURIComponent(APP_ID)}`);
+
+    const pending = app.request(graphUrl('L2', LOGGING_ID));
+    await waitFor(() => agent.callsFor('L2', LOGGING_ID) === 1);
+    const events = sseEvents(await (await app.request(graphUrl('L2', LOGGING_ID, '/progress'))).text());
+
+    expect(events.map((e) => e.type)).toEqual(['started', 'error']);
+    expect(events[1]).toMatchObject({ message: expect.stringContaining('no reply') });
+    expect((await pending).status).toBe(502);
+  });
+
+  it('rejects a nonsense level on the progress stream', async () => {
+    const app = build();
+    expect((await app.request('/api/graph/progress?level=L9&scope=root')).status).toBe(400);
+  });
+
   it('rejects a cancel without a level or scope, and reports false when nothing runs', async () => {
     const app = build();
     const post = (body: unknown) =>
