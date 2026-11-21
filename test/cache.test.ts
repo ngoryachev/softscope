@@ -118,6 +118,47 @@ describe('latest entry for a scope', () => {
   });
 });
 
+describe('agent partitions', () => {
+  it('latest() never crosses into another agent\'s entries, even newer ones of the preferred commit', async () => {
+    const cache = tempCache();
+    const key = baseKey('/tmp/repo-a');
+    cache.set({ ...key, stateId: 'commitA', agent: 'claude-agent-sdk' }, { marker: 'claude@A' });
+    await new Promise((r) => setTimeout(r, 5));
+    cache.set({ ...key, stateId: 'commitB+dirty', agent: 'fake' }, { marker: 'fake@B' });
+
+    const asClaude = { repoPath: key.repoPath, level: 'L4' as const, scopeId: 'root', agent: 'claude-agent-sdk' };
+    expect(cache.latest<{ marker: string }>(asClaude)?.value).toEqual({ marker: 'claude@A' });
+    expect(cache.latest<{ marker: string }>(asClaude, { statePrefix: 'commitB' })?.value).toEqual({ marker: 'claude@A' });
+    expect(cache.latest({ ...asClaude, agent: 'other' })).toBeNull();
+  });
+
+  it('a tampered envelope claiming another agent is not served under that agent', () => {
+    const cache = tempCache();
+    const key = baseKey('/tmp/repo-a');
+    const file = cache.set(key, { marker: 'fake' });
+    const envelope = JSON.parse(readFileSync(file, 'utf8')) as { key: CacheKey };
+    envelope.key.agent = 'claude-agent-sdk';
+    writeFileSync(file, JSON.stringify(envelope));
+
+    expect(cache.get(key)).toBeNull();
+    expect(cache.latest({ repoPath: key.repoPath, level: 'L4', scopeId: 'root', agent: 'fake' })).toBeNull();
+  });
+
+  it('deleteRepo() drops every agent\'s partition of the repository', () => {
+    const cache = tempCache();
+    const key = baseKey('/tmp/repo-a');
+    cache.set(key, { marker: 'fake' });
+    cache.set({ ...key, agent: 'claude-agent-sdk' }, { marker: 'claude' });
+    cache.set({ ...key, repoPath: '/tmp/repo-b' }, { marker: 'other repo' });
+
+    cache.deleteRepo(key.repoPath);
+
+    expect(cache.get(key)).toBeNull();
+    expect(cache.get({ ...key, agent: 'claude-agent-sdk' })).toBeNull();
+    expect(cache.get({ ...key, repoPath: '/tmp/repo-b' })).toEqual({ marker: 'other repo' });
+  });
+});
+
 describe('cache location', () => {
   it('writes under the configured root and never inside the analyzed repository', () => {
     const repo = copyFixture();
