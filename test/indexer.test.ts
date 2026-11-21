@@ -83,6 +83,18 @@ describe('tsconfig parsing', () => {
     // The trailing-comma strip used to run over the whole document, including strings.
     expect(parseJsonc('{"glob": "src/**/*.ts, }"}')).toEqual({ glob: 'src/**/*.ts, }' });
   });
+
+  it('leaves comment markers and escaped quotes inside string values alone', () => {
+    expect(parseJsonc('{"a": "//not a comment", "b": "/*nor this*/"}')).toEqual({
+      a: '//not a comment',
+      b: '/*nor this*/',
+    });
+    expect(parseJsonc('{"a": "x\\",}"}')).toEqual({ a: 'x",}' });
+    // A trailing comma separated from its brace by a comment is still a trailing comma.
+    expect(parseJsonc('{"paths": {"@x/*": ["src/x/*"],}, /* done */ }')).toEqual({
+      paths: { '@x/*': ['src/x/*'] },
+    });
+  });
 });
 
 describe('import graph', () => {

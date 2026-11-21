@@ -7,6 +7,7 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { appendFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { FakeSchemaAgent, indexDerivedReply } from '../src/server/agent/fake';
+import { summarizeForAgent } from '../src/server/indexer/index';
 import { LevelNotSupportedError, RepoSession, ScopeNotFoundError } from '../src/server/session';
 import type { FileCache } from '../src/server/cache/file-cache';
 import { agentGraph, cleanupTemps, commitAll, copyFixture, copyFixtureAsGitRepo, tempCache } from './helpers';
@@ -133,6 +134,23 @@ describe('L4', () => {
     expect(agent.calls).toHaveLength(1);
     expect(a.view.nodes).toHaveLength(b.view.nodes.length);
   });
+
+  it('keeps the in-flight entry consistent when a refresh overlaps a plain request', async () => {
+    agent = new FakeSchemaAgent({ replies: { 'L4:root': l4Reply }, strict: true, delayMs: 20 });
+    session = newSession();
+
+    await Promise.all([
+      session.graph({ level: 'L4', scopeId: 'root' }),
+      session.graph({ level: 'L4', scopeId: 'root', refresh: true }),
+      session.graph({ level: 'L4', scopeId: 'root' }),
+    ]);
+
+    // The plain requests share one run, the refresh is the second: a stale in-flight
+    // entry would leak a third agent call here or on the next request.
+    expect(agent.calls).toHaveLength(2);
+    expect((await session.graph({ level: 'L4', scopeId: 'root' })).cached).toBe(true);
+    expect(agent.calls).toHaveLength(2);
+  });
 });
 
 describe('lazy L3', () => {
@@ -167,6 +185,33 @@ describe('lazy L3', () => {
     expect(core.view.nodes).toHaveLength(2);
     expect(agent.callsFor('L4', 'root')).toBe(1);
     expect(agent.callsFor('L3', CORE_ID)).toBe(1);
+  });
+
+  it('gives the agent the whole repository when the application covers it', async () => {
+    // The one-application case: the L4 node names "." as its area, so the L3 scope and
+    // the digest it is built from have to cover every file, not just the evidence file.
+    const wholeRepo = agentGraph([
+      {
+        slug: 'app',
+        kind: 'application',
+        title: 'sample-app',
+        paths: ['.'],
+        hasDetail: true,
+        evidence: [{ file: 'package.json', startLine: 1, endLine: 2 }],
+      },
+    ]);
+    agent = new FakeSchemaAgent({ replies: { 'L4:root': wholeRepo }, strict: false });
+    session = newSession();
+
+    const l4 = await session.graph({ level: 'L4', scopeId: 'root' });
+    expect(l4.openable).toEqual([{ level: 'L3', id: 'L4:root/app', label: 'sample-app', paths: ['.'] }]);
+
+    await session.graph({ level: 'L3', scopeId: 'L4:root/app' });
+    const request = agent.calls.at(-1)!;
+    expect(request.scope.paths).toEqual(['.']);
+    const digest = summarizeForAgent(request.index, request.scope);
+    expect(digest).toContain(`files in scope: ${request.index.files.length}`);
+    expect(digest).toContain('packages/core/src/math.ts');
   });
 
   it('reports an unknown scope rather than inventing one', async () => {
@@ -254,6 +299,13 @@ describe('a directory without git', () => {
     expect(second.view.snapshot.stateId).not.toBe(first.view.snapshot.stateId);
     expect(second.cached).toBe(false);
     expect(plainAgent.calls).toHaveLength(2);
+  });
+
+  it('reuses the index while the directory is untouched', () => {
+    // `liveSnapshot` walks the tree on every call here, so the state id it produces has
+    // to match the one the index was built with, or every request would re-index.
+    const { plainSession: s } = plainSession();
+    expect(s.index()).toBe(s.index());
   });
 
   it('invalidates the cached schema after a file is added', async () => {

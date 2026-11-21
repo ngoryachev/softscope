@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createApp } from '../src/server/http/app';
 import { FakeSchemaAgent } from '../src/server/agent/fake';
@@ -189,6 +189,19 @@ describe('/api/file', () => {
     expect((await app.request('/api/file?path=/etc/passwd')).status).toBe(400);
     expect((await app.request('/api/file?path=')).status).toBe(400);
     expect((await app.request('/api/file?path=.')).status).toBe(400);
+  });
+
+  it('refuses a symlink inside the repository that points outside it', async () => {
+    // The lexical check alone cannot see this: the path stays under the repository and
+    // only the link target leaves it.
+    const outside = join(repo, '..', 'outside-of-repo.txt');
+    writeFileSync(outside, 'not part of the analyzed repository\n', 'utf8');
+    symlinkSync(outside, join(repo, 'escape.txt'));
+    const app = build();
+
+    const res = await app.request('/api/file?path=escape.txt');
+    expect(res.status).toBe(400);
+    expect(await res.text()).not.toContain('not part of the analyzed repository');
   });
 
   it('answers 404 for a path that is not a file', async () => {
