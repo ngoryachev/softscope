@@ -112,6 +112,8 @@ export class RepoSession {
       ...(deps.changeAgent ? { agent: deps.changeAgent } : {}),
       workDir: deps.workDir ?? join(homedir(), '.softscope', 'changes'),
     });
+    // A previous server run may have left its drafts behind; nothing could reach them.
+    this.changes.pruneLeftovers();
   }
 
   isGitRepo(): boolean {
@@ -155,6 +157,7 @@ export class RepoSession {
       generatableLevels: generatableLevels(),
       fakeAgent: this.deps.agent.name === 'fake',
       changeAgent: this.deps.changeAgent?.name ?? null,
+      activeChangeId: this.changes.active()?.id ?? null,
     };
   }
 

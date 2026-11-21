@@ -28,7 +28,15 @@ import { AgentError, type ChangeAgent, type CheckCommand } from '../agent/types'
 import { sameState } from '../indexer/git';
 import { JobRegistry } from '../jobs';
 import { detectChecks, runChecks } from './checks';
-import { applyPatch, checkPatch, createWorkspace, removeWorkspace, workspaceDiff, WorkspaceRefusedError } from './workspace';
+import {
+  applyPatch,
+  checkPatch,
+  createWorkspace,
+  pruneLeftoverWorkspaces,
+  removeWorkspace,
+  workspaceDiff,
+  WorkspaceRefusedError,
+} from './workspace';
 
 /** What the manager needs from the session; `RepoSession` satisfies it. */
 export interface ChangeHost {
@@ -96,9 +104,12 @@ export class OutsideLimitsError extends Error {
   }
 }
 
-/** The patch cannot land: the repository moved or `git apply --check` failed. Nothing was applied. */
+/** The patch cannot land: `git apply --check` failed against the user's tree. Nothing was applied. */
 export class ApplyConflictError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly files: string[] = [],
+  ) {
     super(message);
     this.name = 'ApplyConflictError';
   }
@@ -231,9 +242,11 @@ export class ChangeManager {
   }
 
   /**
-   * Lands the patch in the user's tree. Refused — with nothing applied — when the
-   * repository moved since the change started, when `git apply --check` fails, or when a
-   * file lies outside the selected area and the user did not confirm.
+   * Lands the patch in the user's tree. The user keeps working while the agent runs, so a
+   * repository that moved since the change started is normal: `git apply --check` is the
+   * one conflict guard. Refused — with nothing applied — when that check fails (the
+   * conflicting files are named) or when a file lies outside the selected area and the
+   * user did not confirm.
    */
   apply(id: string, confirmOutside = false): ApplyResponse {
     const record = this.get(id);
@@ -243,20 +256,21 @@ export class ChangeManager {
     const patch = this.verify(record);
     if (patch.length === 0) throw new ChangeStateError('The change produced no diff; there is nothing to apply.');
 
-    const live = this.host.liveSnapshot();
-    if (!sameState(live, record.startSnapshot)) {
-      throw new ApplyConflictError(
-        `The repository moved since the change started (${record.startSnapshot.branch}@${record.startSnapshot.shortCommit}` +
-          `${record.startSnapshot.dirty ? ' with uncommitted changes' : ''} → ${live.branch}@${live.shortCommit}` +
-          `${live.dirty ? ' with uncommitted changes' : ''}). Nothing was applied. Discard the change and run it again on the current state.`,
-      );
-    }
     const outside = record.files.filter((f) => f.outsideLimits).map((f) => f.path);
     if (outside.length > 0 && !confirmOutside) throw new OutsideLimitsError(outside);
 
-    const checkFailure = checkPatch(this.host.repoPath, patch);
-    if (checkFailure) {
-      throw new ApplyConflictError(`The patch does not apply to the working tree: ${checkFailure}. Nothing was applied.`);
+    const live = this.host.liveSnapshot();
+    const movedSince = !sameState(live, record.startSnapshot);
+    const moved = describeMove(record.startSnapshot, live);
+    const conflict = checkPatch(this.host.repoPath, patch);
+    if (conflict) {
+      const where = conflict.files.length > 0 ? conflict.files.join(', ') : 'the working tree';
+      throw new ApplyConflictError(
+        `The patch no longer fits ${where}: ${movedSince ? `${moved}, and the ` : 'the '}lines the change touches differ ` +
+          `(${conflict.detail.split('\n')[0]}). Nothing was applied. Revert your edits to ${conflict.files.length === 1 ? 'that file' : 'those files'} ` +
+          'and apply again, or discard the change and run it on the current state.',
+        conflict.files,
+      );
     }
     const applyFailure = applyPatch(this.host.repoPath, patch);
     if (applyFailure) throw new ApplyConflictError(`git apply failed: ${applyFailure}.`);
@@ -268,7 +282,19 @@ export class ChangeManager {
       applied: record.files.map((f) => f.path),
       snapshot: this.host.liveSnapshot(),
       affectedViews: record.affectedViews,
+      movedSince,
+      note: movedSince ? `Applied on top of a repository that moved since the change started: ${moved}.` : '',
     };
+  }
+
+  /**
+   * Removes the worktrees a previous server run left under the work directory for this
+   * repository: nothing in memory knows them, so nobody could apply or discard them.
+   */
+  pruneLeftovers(): string[] {
+    if (!this.host.isGitRepo()) return [];
+    const known = [...this.changes.values()].filter((r) => OPEN_STATES.has(r.status)).map((r) => r.workspaceDir);
+    return pruneLeftoverWorkspaces(this.host.repoPath, this.opts.workDir, known);
   }
 
   /**
@@ -395,6 +421,14 @@ export class ChangeManager {
       finishedAt: record.finishedAt,
     };
   }
+}
+
+/** What moved between the state a change started from and the live one, in the user's words. */
+function describeMove(start: Snapshot, live: Snapshot): string {
+  const label = (s: Snapshot) => `${s.branch}@${s.shortCommit}${s.dirty ? ' with uncommitted changes' : ''}`;
+  if (start.commit !== live.commit || start.branch !== live.branch) return `${label(start)} → ${label(live)}`;
+  if (start.dirty && live.dirty) return `the uncommitted changes differ from the ones the change was built on (${label(live)})`;
+  return live.dirty ? `uncommitted changes appeared since (${label(live)})` : `the uncommitted changes went away since (${label(live)})`;
 }
 
 /**

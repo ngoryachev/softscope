@@ -76,7 +76,19 @@ async function main(): Promise<void> {
     }
   }
 
-  const { app } = createApp({ agent, cache, changeAgent, workDir, ...(session ? { session } : {}) });
+  const { app, current } = createApp({ agent, cache, changeAgent, workDir, ...(session ? { session } : {}) });
+
+  // Checks run in their own process group so cancel can reach them; the flip side is that
+  // Ctrl+C on the server no longer does. Cancel the open change — which signals the
+  // running check group through the abort path — and then leave.
+  const shutdown = (signal: NodeJS.Signals) => {
+    const open = current()?.changes.active();
+    if (open && open.status === 'running') current()!.changes.cancel(open.id);
+    process.stdout.write(`\n${signal}: ${open?.status === 'running' ? `cancelled change ${open.id}, ` : ''}shutting down\n`);
+    setTimeout(() => process.exit(0), 300).unref();
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
   const distDir = join(projectRoot, 'dist', 'web');
   const hasUi = await mountWebUi(app, distDir);
 

@@ -161,11 +161,13 @@ the checks and the diff are recomputed. **Cancel** aborts the agent and keeps th
 worktree so you can look at what it did, or discard it.
 
 **Apply** lands the patch in your working tree with `git apply` — no commit, no staging.
-It is refused, with nothing applied, when the repository moved since the change started
-(a different commit, branch or working-tree state: discard and run again) or when
-`git apply --check` fails. When a changed file lies outside the selected area, the UI
-asks for confirmation first and sends `confirmOutside: true`. On success the worktree
-is removed. **Discard** removes the worktree (`git worktree remove --force` and prune)
+You keep working while the agent runs, so a repository that moved since the change
+started is normal: the patch is applied as long as `git apply --check` accepts it, and
+the response says what moved (`movedSince`, `note`). It is refused, with nothing applied,
+only when the check fails — the response names the conflicting files, so you can revert
+your edits to them and apply again, or discard and run the change on the current state.
+When a changed file lies outside the selected area, the UI asks for confirmation first
+and sends `confirmOutside: true`. On success the worktree is removed. **Discard** removes the worktree (`git worktree remove --force` and prune)
 and leaves nothing behind. One change is open at a time per repository; apply or discard
 it before starting another.
 
@@ -203,11 +205,15 @@ Two things to know: `git worktree add` writes worktree metadata into your reposi
 your branches are never touched; the metadata is removed again on apply or discard
 (`git worktree prune` cleans up after a crash) and the base commit becomes garbage that
 `git gc` collects. Your git hooks do not run for this bookkeeping, and the patches are
-produced with explicit `a/` `b/` prefixes whatever your `diff.*` settings say. And the changes live in memory — restarting the server forgets them, and a worktree left
-under `~/.softscope/changes` has to be removed by hand (`git worktree prune` in the
-repository, then delete the directory). With `SOFTSCOPE_FAKE_AGENT=1` the change agent is
-faked too: it appends a comment carrying your instruction to the first selected file, so
-the whole flow can be clicked through without tokens.
+produced with explicit `a/` `b/` prefixes whatever your `diff.*` settings say. And the
+changes live in memory: a page reload picks the open change up again (`GET /api/state`
+reports `activeChangeId`), but restarting the server forgets it — the next time the
+repository is opened, the worktrees a previous run left under the work directory are
+removed, so an unreviewed draft does not survive a restart. With `SOFTSCOPE_FAKE_AGENT=1` the change agent is
+faked too: it appends a comment carrying your instruction to the first selected file that
+can take one (a `package.json` is left alone), so the whole flow can be clicked through
+without tokens. Ctrl+C on the server cancels an open change, which stops its running
+checks, before the server exits.
 
 ## Requirements
 

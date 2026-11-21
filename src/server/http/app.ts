@@ -156,6 +156,7 @@ export function createApp(deps: AppDeps): SoftscopeApp {
     generatableLevels: generatableLevels(),
     fakeAgent: deps.agent.name === 'fake',
     changeAgent: deps.changeAgent?.name ?? null,
+    activeChangeId: null,
   });
 
   const sessionDeps = () => ({
@@ -266,7 +267,8 @@ export function createApp(deps: AppDeps): SoftscopeApp {
     if (err instanceof ChangeUnavailableError) return reply(501, err.message);
     if (err instanceof NoRepoError || err instanceof WorkspaceRefusedError) return reply(409, err.message);
     if (err instanceof ChangeActiveError) return reply(409, err.message, { detail: err.activeId });
-    if (err instanceof ChangeStateError || err instanceof ApplyConflictError) return reply(409, err.message);
+    if (err instanceof ChangeStateError) return reply(409, err.message);
+    if (err instanceof ApplyConflictError) return reply(409, err.message, err.files.length ? { conflictFiles: err.files } : {});
     if (err instanceof OutsideLimitsError) return reply(409, err.message, { outsideFiles: err.files });
     if (err instanceof AgentError) return reply(502, err.message, err.detail ? { detail: err.detail } : {});
     return reply(500, err instanceof Error ? err.message : String(err));

@@ -94,24 +94,24 @@ export class FakeChangeAgent implements ChangeAgent {
 }
 
 /**
- * The first context file that exists in the worktree — preferring one whose comment
- * syntax is known, so a `package.json` in the evidence is not broken — else the first
- * file under the limits.
+ * A file the fake can append a comment to without breaking it: the first context file
+ * with a known comment syntax, else the first such file under the limits, and only as a
+ * last resort a context file of any kind (a `package.json` would end up invalid).
  */
 function pickTarget(req: ChangeRunRequest): string | null {
-  const present = req.context.files.filter((f) => isFile(join(req.workspaceDir, f.file)));
-  const commentable = present.find((f) => COMMENT_PREFIX[extname(f.file)] !== undefined);
-  if (commentable) return commentable.file;
-  if (present[0]) return present[0].file;
+  const commentable = (file: string) => COMMENT_PREFIX[extname(file)] !== undefined;
+  const present = req.context.files.map((f) => f.file).filter((f) => isFile(join(req.workspaceDir, f)));
+  const fromContext = present.find(commentable);
+  if (fromContext) return fromContext;
   for (const p of req.context.limits.paths) {
     const abs = join(req.workspaceDir, p);
-    if (isFile(abs)) return p;
-    if (existsSync(abs)) {
+    if (isFile(abs) && commentable(p)) return p;
+    if (existsSync(abs) && !isFile(abs)) {
       const inside = listFiles(req.workspaceDir).codeFiles.find((f) => f === p || f.startsWith(`${p.replace(/\/+$/, '')}/`));
       if (inside) return inside;
     }
   }
-  return null;
+  return present[0] ?? null;
 }
 
 function isFile(path: string): boolean {

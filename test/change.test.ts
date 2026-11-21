@@ -10,7 +10,8 @@ import { createApp } from '../src/server/http/app';
 import { FakeSchemaAgent } from '../src/server/agent/fake';
 import { FakeChangeAgent, type FakeChangeAgentOptions } from '../src/server/agent/fake-change';
 import { RepoSession } from '../src/server/session';
-import type { ApiError, ApplyResponse, ChangeStatus } from '../src/shared/api';
+import type { ApiError, ApplyResponse, ChangeStatus, RepoState } from '../src/shared/api';
+import type { SelectionContext, Snapshot } from '../src/shared/graph';
 import {
   agentGraph,
   cleanupTemps,
@@ -362,18 +363,21 @@ describe('POST /api/change/:id/apply and /discard', () => {
     expect(gitOut(repo, ['status', '--porcelain']).trim()).toBe('?? src/util/created.ts');
   });
 
-  it('refuses to apply when the user edited the repository meanwhile, and applies nothing', async () => {
+  it('refuses to apply when the user edited the same lines meanwhile, names the file, and applies nothing', async () => {
     const app = build();
     await loadViews(app);
     const id = await startChange(app);
     const done = await settled(app, id);
 
+    // The fake appends to the end of the file; so does the user: the hunk no longer fits.
     appendFileSync(join(repo, LOG_FILE), '\nexport const meanwhile = 1;\n');
     const res = await post(app, `/api/change/${id}/apply`, {});
     expect(res.status).toBe(409);
     const body = (await res.json()) as ApiError;
-    expect(body.error).toMatch(/moved since the change started/);
+    expect(body.error).toContain(LOG_FILE);
+    expect(body.error).toMatch(/uncommitted changes appeared since/);
     expect(body.error).toMatch(/Nothing was applied/);
+    expect(body.conflictFiles).toEqual([LOG_FILE]);
 
     const text = readFileSync(join(repo, LOG_FILE), 'utf8');
     expect(text).toContain('meanwhile');
@@ -383,6 +387,44 @@ describe('POST /api/change/:id/apply and /discard', () => {
     // The worktree can still be dropped.
     expect((await post(app, `/api/change/${id}/discard`)).status).toBe(200);
     expect(existsSync(done.workspaceDir)).toBe(false);
+  });
+
+  it('applies on top of unrelated edits and commits the user made meanwhile, and says the repository moved', async () => {
+    const app = build();
+    await loadViews(app);
+    const id = await startChange(app);
+    const done = await settled(app, id);
+
+    // The user kept working: an edit elsewhere, a commit of another file, a dirty tree.
+    appendFileSync(join(repo, 'src/cli.ts'), '\nexport const committedMeanwhile = 1;\n');
+    commitAll(repo, 'meanwhile');
+    appendFileSync(join(repo, 'src/index.ts'), '\nexport const editedMeanwhile = 1;\n');
+    const live = (await (await app.request('/api/snapshot')).json()) as Snapshot;
+    expect(live.stateId).not.toBe(done.startSnapshot.stateId);
+
+    const res = await post(app, `/api/change/${id}/apply`, {});
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ApplyResponse;
+    expect(body.applied).toEqual([LOG_FILE]);
+    expect(body.movedSince).toBe(true);
+    expect(body.note).toMatch(/moved since the change started/);
+    expect(body.note).toContain(done.startSnapshot.shortCommit);
+    expect(body.note).toContain(live.shortCommit);
+    expect(readFileSync(join(repo, LOG_FILE), 'utf8')).toContain('softscope:');
+    expect(readFileSync(join(repo, 'src/index.ts'), 'utf8')).toContain('editedMeanwhile');
+    expect(readFileSync(join(repo, 'src/cli.ts'), 'utf8')).toContain('committedMeanwhile');
+    expect(existsSync(done.workspaceDir)).toBe(false);
+    expect((await status(app, id)).status).toBe('applied');
+  });
+
+  it('reports no move when the tree is exactly as the change found it', async () => {
+    const app = build();
+    await loadViews(app);
+    const id = await startChange(app);
+    await settled(app, id);
+    const body = (await (await post(app, `/api/change/${id}/apply`, {})).json()) as ApplyResponse;
+    expect(body.movedSince).toBe(false);
+    expect(body.note).toBe('');
   });
 
   it('flags a file outside the selected area and requires confirmOutside to apply it', async () => {
@@ -427,6 +469,65 @@ describe('POST /api/change/:id/apply and /discard', () => {
     expect(gitOut(repo, ['status', '--porcelain']).trim()).toBe('');
     expect((await post(app, `/api/change/${id}/discard`)).status).toBe(409);
     expect((await post(app, `/api/change/${id}/apply`, {})).status).toBe(409);
+  });
+});
+
+describe('the open change across reloads and restarts', () => {
+  it('exposes the open change in the state so a reloaded UI can pick it up', async () => {
+    const app = build();
+    await loadViews(app);
+    expect(((await (await app.request('/api/state')).json()) as RepoState).activeChangeId).toBeNull();
+
+    const id = await startChange(app);
+    expect(((await (await app.request('/api/state')).json()) as RepoState).activeChangeId).toBe(id);
+    await settled(app, id);
+    expect(((await (await app.request('/api/state')).json()) as RepoState).activeChangeId).toBe(id);
+
+    expect((await post(app, `/api/change/${id}/discard`)).status).toBe(200);
+    expect(((await (await app.request('/api/state')).json()) as RepoState).activeChangeId).toBeNull();
+  });
+
+  it('a new session removes the worktrees a previous run left behind and starts clean', async () => {
+    const first = build();
+    await loadViews(first);
+    const id = await startChange(first);
+    const done = await settled(first, id);
+    expect(existsSync(done.workspaceDir)).toBe(true);
+    expect(worktrees(repo)).toHaveLength(2);
+
+    // "Server restart": a fresh session over the same repository and work directory.
+    const second = build();
+    expect(existsSync(done.workspaceDir)).toBe(false);
+    expect(worktrees(repo)).toHaveLength(1);
+    expect(((await (await second.request('/api/state')).json()) as RepoState).activeChangeId).toBeNull();
+    expect((await second.request(`/api/change/${id}`)).status).toBe(404);
+    // The user's tree is untouched by the cleanup.
+    expect(gitOut(repo, ['status', '--porcelain']).trim()).toBe('');
+    await loadViews(second);
+    expect((await settled(second, await startChange(second))).status).toBe('done');
+  });
+});
+
+describe('the fake change agent', () => {
+  it('prefers a commentable file under the limits over a package.json in the context', async () => {
+    const dir = copyFixture();
+    const context: SelectionContext = {
+      task: 'demo',
+      nodes: [],
+      files: [{ file: 'packages/core/package.json', ranges: [{ startLine: 1, endLine: 1 }] }],
+      size: { files: 1, lines: 1 },
+      relations: { internal: [], external: [] },
+      snapshots: [],
+      warnings: [],
+      stale: false,
+      limits: { paths: ['packages/core'], note: '' },
+    };
+    const before = readFileSync(join(dir, 'packages/core/package.json'), 'utf8');
+    const result = await new FakeChangeAgent().run({ workspaceDir: dir, context, task: 'demo', checks: [] });
+    expect(result.changedFiles).toEqual(['packages/core/src/index.ts']);
+    expect(readFileSync(join(dir, 'packages/core/src/index.ts'), 'utf8')).toContain('// softscope: demo');
+    expect(readFileSync(join(dir, 'packages/core/package.json'), 'utf8')).toBe(before);
+    expect(() => JSON.parse(readFileSync(join(dir, 'packages/core/package.json'), 'utf8'))).not.toThrow();
   });
 });
 

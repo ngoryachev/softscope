@@ -86,6 +86,7 @@ const state: RepoState = {
   generatableLevels: ['L4', 'L3', 'L2'],
   fakeAgent: true,
   changeAgent: 'fake',
+  activeChangeId: null,
 };
 
 /** An L3 view of "server" with two subsystems, and the L2 of one of them. */

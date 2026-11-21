@@ -235,10 +235,55 @@ export function removeWorkspace(repoPath: string, dir: string): void {
   git(repoPath, ['worktree', 'prune']);
 }
 
-/** `git apply --check` of `patch` against the user's tree: null when it applies, else why not. */
-export function checkPatch(repoPath: string, patch: string): string | null {
+export interface PatchConflict {
+  /** The files `git apply` could not place, as far as its messages name them. */
+  files: string[];
+  detail: string;
+}
+
+/** The paths named in `git apply` error lines (`patch failed: x:1`, `x: patch does not apply`, ...). */
+export function conflictingFiles(stderr: string): string[] {
+  const files = new Set<string>();
+  for (const line of stderr.split('\n')) {
+    const failed = /^error: patch failed: (.+):\d+$/.exec(line);
+    if (failed) {
+      files.add(failed[1]!);
+      continue;
+    }
+    const named = /^error: (.+?): (?:patch does not apply|already exists in (?:working directory|index)|No such file or directory|does not exist in index|does not match index)/.exec(line);
+    if (named) files.add(named[1]!);
+  }
+  return [...files].sort();
+}
+
+/** `git apply --check` of `patch` against the user's tree: null when it applies, else the conflict. */
+export function checkPatch(repoPath: string, patch: string): PatchConflict | null {
   const r = git(repoPath, ['apply', '--check', '--binary', '--whitespace=nowarn', '-'], patch);
-  return r.ok ? null : r.stderr.trim() || 'the patch does not apply';
+  if (r.ok) return null;
+  const detail = r.stderr.trim() || 'the patch does not apply';
+  return { files: conflictingFiles(r.stderr), detail };
+}
+
+/**
+ * Removes the worktrees of `repoPath` that live under `workDir` and are not in `keep`:
+ * drafts a previous server run left behind. Returns the directories removed.
+ */
+export function pruneLeftoverWorkspaces(repoPath: string, workDir: string, keep: Iterable<string> = []): string[] {
+  const list = git(repoPath, ['worktree', 'list', '--porcelain']);
+  if (!list.ok) return [];
+  const root = `${realOrSelf(workDir)}/`;
+  const kept = new Set([...keep].map((d) => realOrSelf(d)));
+  const removed: string[] = [];
+  for (const line of list.stdout.split('\n')) {
+    if (!line.startsWith('worktree ')) continue;
+    const dir = line.slice('worktree '.length);
+    const real = realOrSelf(dir);
+    if (!real.startsWith(root) || kept.has(real)) continue;
+    removeWorkspace(repoPath, dir);
+    removed.push(dir);
+  }
+  if (removed.length === 0) git(repoPath, ['worktree', 'prune']);
+  return removed;
 }
 
 /** Applies `patch` to the user's working tree (no commit, no staging). Null on success. */

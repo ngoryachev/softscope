@@ -14,6 +14,8 @@ export interface RepoState {
   fakeAgent: boolean;
   /** Name of the change agent, or null when the server cannot make changes. */
   changeAgent: string | null;
+  /** The one change that is neither applied nor discarded, so a reloaded UI can pick it up. */
+  activeChangeId: string | null;
 }
 
 export interface OpenRepoRequest {
@@ -175,6 +177,10 @@ export interface ApplyResponse {
   /** The live repository state after the patch landed. */
   snapshot: Snapshot;
   affectedViews: ScopeRef[];
+  /** The repository moved since the change started, but the patch still applied cleanly. */
+  movedSince: boolean;
+  /** What moved, when `movedSince`; empty otherwise. */
+  note: string;
 }
 
 /** `GET /api/change/:id/progress`: same shapes as `ProgressEvent`, keyed by the change. */
@@ -193,4 +199,6 @@ export interface ApiError {
   detail?: string;
   /** `POST /api/change/:id/apply` without `confirmOutside`: the files outside the selected area. */
   outsideFiles?: string[];
+  /** `POST /api/change/:id/apply` refused: the files the patch no longer fits. */
+  conflictFiles?: string[];
 }

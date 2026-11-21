@@ -207,10 +207,23 @@ export function App() {
     addNodes(expandSelection(currentView, inView, direction));
   };
 
+  /** The change the server still holds open (a reload, another tab): show it instead of starting blind. */
+  const pickUpOpenChange = (activeChangeId: string | null) => {
+    if (!activeChangeId) return;
+    getChange(activeChangeId)
+      .then(setChange)
+      .catch(() => undefined);
+  };
+
   useEffect(() => {
     getState()
-      .then(setState)
+      .then((s) => {
+        setState(s);
+        pickUpOpenChange(s.activeChangeId);
+      })
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+    // Runs once, on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /** Loads one scope. Any in-flight load for an older request is discarded. */
@@ -445,6 +458,7 @@ export function App() {
         setLive(applied.snapshot);
         setChange(await getChange(change.id));
         setChangeBusy(false);
+        if (applied.movedSince) setNotice(applied.note);
         const loaded = applied.affectedViews.filter((scope) => views.has(viewKey(scope.level, scope.id)));
         const open = current ? loaded.find((scope) => sameScope(scope, current.scope)) : undefined;
         setPendingUpdates(loaded.filter((scope) => !open || !sameScope(scope, open)));
@@ -476,7 +490,8 @@ export function App() {
     setOpening(true);
     setError(null);
     try {
-      setState(await openRepo(path));
+      const opened = await openRepo(path);
+      setState(opened);
       setStack([]);
       // The basket is per repository: ids of one repository mean nothing in another.
       setBasket(EMPTY_BASKET);
@@ -484,6 +499,7 @@ export function App() {
       setViews(new Map());
       closeChange();
       setPendingUpdates([]);
+      pickUpOpenChange(opened.activeChangeId);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
