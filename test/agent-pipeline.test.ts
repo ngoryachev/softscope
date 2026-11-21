@@ -6,10 +6,12 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { appendFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { describeToolInput } from '../src/server/agent/claude';
 import { FakeSchemaAgent, indexDerivedReply } from '../src/server/agent/fake';
 import type { SchemaAgent } from '../src/server/agent/types';
 import { summarizeForAgent } from '../src/server/indexer/index';
-import { LevelNotSupportedError, RepoSession, ScopeNotFoundError } from '../src/server/session';
+import { GenerationCancelledError, LevelNotSupportedError, RepoSession, ScopeNotFoundError } from '../src/server/session';
+import type { ProgressEvent } from '../src/shared/api';
 import type { FileCache } from '../src/server/cache/file-cache';
 import {
   agentGraph,
@@ -26,6 +28,8 @@ afterAll(cleanupTemps);
 
 const CORE_ID = 'L4:root/core';
 const UI_ID = 'L4:root/ui';
+const MATH_ID = `L3:${CORE_ID}/math`;
+const SCHEMA_ID = `L3:${CORE_ID}/schema`;
 
 /** L4: two packages plus a boundary node, both packages openable. */
 const l4Reply = agentGraph(
@@ -66,16 +70,64 @@ const coreL3Reply = agentGraph(
       slug: 'math',
       title: 'arithmetic',
       paths: ['packages/core/src/math.ts'],
+      hasDetail: true,
       evidence: [{ file: 'packages/core/src/math.ts', startLine: 1, endLine: 3 }],
     },
     {
       slug: 'schema',
       title: 'schema',
       paths: ['packages/core/src/index.ts'],
+      hasDetail: true,
       evidence: [{ file: 'packages/core/src/index.ts', startLine: 1, endLine: 5 }],
     },
   ],
   [{ from: 'schema', to: 'math', evidence: [{ file: 'packages/core/src/index.ts', startLine: 2, endLine: 2 }] }],
+);
+
+/**
+ * L2 of the "schema" subsystem: a group, an entity shared with the neighbouring
+ * "arithmetic" subsystem, the `add` function of that subsystem as a linked boundary
+ * node, and a boundary node whose link points nowhere.
+ */
+const schemaL2Reply = agentGraph(
+  [
+    {
+      slug: 'validation',
+      kind: 'module',
+      title: 'validation',
+      paths: ['packages/core/src/index.ts'],
+      evidence: [{ file: 'packages/core/src/index.ts', startLine: 1, endLine: 5 }],
+    },
+    {
+      slug: 'schema-const',
+      kind: 'constant',
+      title: 'schema',
+      paths: ['packages/core/src/index.ts'],
+      memberOf: ['validation', 'add'],
+      evidence: [{ file: 'packages/core/src/index.ts', startLine: 4, endLine: 4 }],
+    },
+    {
+      slug: 'add',
+      kind: 'function',
+      title: 'add',
+      boundary: true,
+      subsystemId: MATH_ID,
+      evidence: [{ file: 'packages/core/src/math.ts', startLine: 1, endLine: 3 }],
+    },
+    {
+      slug: 'zod',
+      kind: 'external-dependency',
+      title: 'zod',
+      boundary: true,
+      subsystemId: 'L3:L4:root/core/nowhere',
+      evidence: [{ file: 'packages/core/src/index.ts', startLine: 1, endLine: 1 }],
+    },
+  ],
+  [
+    { from: 'validation', to: 'add', kind: 'imports', evidence: [{ file: 'packages/core/src/index.ts', startLine: 2, endLine: 2 }] },
+    { from: 'validation', to: 'zod', kind: 'imports', evidence: [{ file: 'packages/core/src/index.ts', startLine: 1, endLine: 1 }] },
+  ],
+  { diagramKind: 'data-flow' },
 );
 
 let repo: string;
@@ -91,7 +143,7 @@ beforeEach(() => {
   repo = copyFixtureAsGitRepo();
   cache = tempCache();
   agent = new FakeSchemaAgent({
-    replies: { 'L4:root': l4Reply, [`L3:${CORE_ID}`]: coreL3Reply },
+    replies: { 'L4:root': l4Reply, [`L3:${CORE_ID}`]: coreL3Reply, [`L2:${SCHEMA_ID}`]: schemaL2Reply },
     strict: true,
   });
   session = newSession();
@@ -229,9 +281,170 @@ describe('lazy L3', () => {
   });
 
   it('reports a level that has no prompt builder yet', async () => {
-    await expect(session.graph({ level: 'L2', scopeId: CORE_ID })).rejects.toThrow(LevelNotSupportedError);
+    await expect(session.graph({ level: 'L1', scopeId: SCHEMA_ID })).rejects.toThrow(LevelNotSupportedError);
   });
 });
+
+describe('lazy L2', () => {
+  const openSchema = async () => {
+    await session.graph({ level: 'L4', scopeId: 'root' });
+    await session.graph({ level: 'L3', scopeId: CORE_ID });
+    return session.graph({ level: 'L2', scopeId: SCHEMA_ID });
+  };
+
+  it('offers the L2 scopes of the subsystems and generates only the one the user opened', async () => {
+    await session.graph({ level: 'L4', scopeId: 'root' });
+    const core = await session.graph({ level: 'L3', scopeId: CORE_ID });
+    expect(core.openable.map((s) => s.id)).toEqual([MATH_ID, SCHEMA_ID]);
+
+    const schema = await session.graph({ level: 'L2', scopeId: SCHEMA_ID });
+
+    expect(schema.view.scope).toMatchObject({ level: 'L2', id: SCHEMA_ID, paths: ['packages/core/src/index.ts'] });
+    expect(schema.view.diagramKind).toBe('data-flow');
+    expect(schema.view.nodes.map((n) => n.title)).toEqual(['validation', 'schema', 'add', 'zod']);
+    expect(agent.callsFor('L2', SCHEMA_ID)).toBe(1);
+    // The neighbouring subsystem was never analyzed (SPEC 6.2).
+    expect(agent.callsFor('L2', MATH_ID)).toBe(0);
+    expect(agent.calls).toHaveLength(3);
+    // Entities are not opened further in this version.
+    expect(schema.openable).toEqual([]);
+  });
+
+  it('hands the agent the parent L3 node and the neighbouring subsystems', async () => {
+    await openSchema();
+
+    const request = agent.calls.at(-1)!;
+    expect(request.scope.level).toBe('L2');
+    expect(request.parent?.scope).toMatchObject({ level: 'L3', id: CORE_ID });
+    expect(request.parent?.node.title).toBe('schema');
+    expect(request.parent?.siblings).toEqual([{ id: MATH_ID, title: 'arithmetic', paths: ['packages/core/src/math.ts'] }]);
+  });
+
+  it('keeps a boundary link to a sibling subsystem and drops one that points nowhere', async () => {
+    const schema = await openSchema();
+
+    const add = schema.view.nodes.find((n) => n.title === 'add')!;
+    expect(add.boundary).toBe(true);
+    expect(add.subsystemId).toBe(MATH_ID);
+    expect(add.childScope).toBeNull();
+
+    const zod = schema.view.nodes.find((n) => n.title === 'zod')!;
+    expect(zod.subsystemId).toBe('');
+    expect(schema.issues.filter((i) => i.kind === 'subsystem-link-dropped')).toHaveLength(1);
+    expect(schema.issues.find((i) => i.kind === 'subsystem-link-dropped')?.nodeId).toBe(zod.id);
+  });
+
+  it('keeps an entity that is a member of its group and of the neighbouring boundary node', async () => {
+    const schema = await openSchema();
+
+    const entity = schema.view.nodes.find((n) => n.title === 'schema')!;
+    expect(entity.memberOf).toEqual([`L2:${SCHEMA_ID}/validation`, `L2:${SCHEMA_ID}/add`]);
+  });
+
+  it('caches the L2 and serves the way back up without calling the agent', async () => {
+    await openSchema();
+    expect(agent.calls).toHaveLength(3);
+
+    const again = await session.graph({ level: 'L2', scopeId: SCHEMA_ID });
+    expect(again.cached).toBe(true);
+    expect(agent.calls).toHaveLength(3);
+
+    // Breadcrumbs: back to L3, back to L4 — both from memory, neither reaches the agent.
+    expect((await session.graph({ level: 'L3', scopeId: CORE_ID })).cached).toBe(true);
+    expect((await session.graph({ level: 'L4', scopeId: 'root' })).cached).toBe(true);
+    expect(agent.calls).toHaveLength(3);
+
+    // A restarted server: the L2 deep link resolves L4 and L3 from the cache too.
+    const later = await newSession().graph({ level: 'L2', scopeId: SCHEMA_ID });
+    expect(later.cached).toBe(true);
+    expect(later.view.nodes.find((n) => n.title === 'add')?.subsystemId).toBe(MATH_ID);
+    expect(agent.calls).toHaveLength(3);
+  });
+
+  it('marks the L2 stale after an uncommitted edit, like any other level', async () => {
+    const fresh = await openSchema();
+    expect(fresh.stale).toBe(false);
+    appendFileSync(join(repo, 'packages/core/src/math.ts'), '\nexport const seven = 7;\n');
+
+    const dirty = await session.graph({ level: 'L2', scopeId: SCHEMA_ID });
+
+    expect(dirty.cached).toBe(true);
+    expect(dirty.stale).toBe(true);
+    expect(agent.calls).toHaveLength(3);
+  });
+
+  it('cancels a running generation, caches nothing and generates again next time', async () => {
+    agent = new FakeSchemaAgent({
+      replies: { 'L4:root': l4Reply, [`L3:${CORE_ID}`]: coreL3Reply, [`L2:${SCHEMA_ID}`]: schemaL2Reply },
+      strict: true,
+      delayMs: 200,
+    });
+    session = newSession();
+    await session.graph({ level: 'L4', scopeId: 'root' });
+    await session.graph({ level: 'L3', scopeId: CORE_ID });
+
+    const pending = session.graph({ level: 'L2', scopeId: SCHEMA_ID });
+    await waitFor(() => agent.callsFor('L2', SCHEMA_ID) === 1);
+    expect(session.cancel('L2', SCHEMA_ID)).toBe(true);
+    await expect(pending).rejects.toThrow(GenerationCancelledError);
+
+    const stateId = session.liveSnapshot().stateId;
+    expect(cache.get({ repoPath: repo, stateId, level: 'L2', scopeId: SCHEMA_ID, agent: 'fake' })).toBeNull();
+    // Nothing is running any more, so there is nothing to cancel or to subscribe to.
+    expect(session.cancel('L2', SCHEMA_ID)).toBe(false);
+    expect(session.subscribe('L2', SCHEMA_ID, () => undefined)).toBeNull();
+
+    const retry = await session.graph({ level: 'L2', scopeId: SCHEMA_ID });
+    expect(retry.cached).toBe(false);
+    expect(agent.callsFor('L2', SCHEMA_ID)).toBe(2);
+  });
+
+  it('reports progress once for two concurrent requests that share one agent call', async () => {
+    agent = new FakeSchemaAgent({
+      replies: { 'L4:root': l4Reply, [`L3:${CORE_ID}`]: coreL3Reply, [`L2:${SCHEMA_ID}`]: schemaL2Reply },
+      progress: { [`L2:${SCHEMA_ID}`]: [{ tool: 'Read', detail: 'packages/core/src/index.ts' }] },
+      strict: true,
+      delayMs: 100,
+    });
+    session = newSession();
+    await session.graph({ level: 'L4', scopeId: 'root' });
+    await session.graph({ level: 'L3', scopeId: CORE_ID });
+
+    const events: ProgressEvent[] = [];
+    const [a, b] = [session.graph({ level: 'L2', scopeId: SCHEMA_ID }), session.graph({ level: 'L2', scopeId: SCHEMA_ID })];
+    await waitFor(() => agent.callsFor('L2', SCHEMA_ID) === 1);
+    // A late subscriber gets the buffered events first, then the live ones.
+    const detach = session.subscribe('L2', SCHEMA_ID, (e) => events.push(e));
+    expect(detach).not.toBeNull();
+    await Promise.all([a, b]);
+
+    expect(agent.callsFor('L2', SCHEMA_ID)).toBe(1);
+    expect(events.filter((e) => e.type === 'started')).toHaveLength(1);
+    expect(events.filter((e) => e.type === 'activity')).toMatchObject([{ tool: 'Read', detail: 'packages/core/src/index.ts' }]);
+    expect(events.at(-1)?.type).toBe('done');
+    expect(agent.calls.at(-1)?.signal?.aborted).toBe(false);
+  });
+});
+
+describe('agent activity shown to the user', () => {
+  it('names the file for Read, the pattern for Grep and Glob, and falls back to the input', () => {
+    expect(describeToolInput('Read', { file_path: 'src/x.ts' })).toBe('src/x.ts');
+    expect(describeToolInput('Grep', { pattern: 'foo' })).toBe('foo');
+    expect(describeToolInput('Grep', { pattern: 'foo', path: 'src' })).toBe('foo in src');
+    expect(describeToolInput('Glob', { pattern: '**/*.ts' })).toBe('**/*.ts');
+    expect(describeToolInput('Other', { thing: 1 })).toBe('{"thing":1}');
+    expect(describeToolInput('Read', undefined)).toBe('{}');
+  });
+});
+
+/** Polls `condition` until it holds; the fake agent starts after a few awaited ticks. */
+async function waitFor(condition: () => boolean, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error('waitFor: condition not met in time');
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
 
 describe('snapshot changes', () => {
   it('shows the previous schema marked stale after a commit, and regenerates on request', async () => {

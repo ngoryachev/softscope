@@ -5,7 +5,7 @@
  */
 import { emptyAgentGraph, type AgentGraph } from '../../shared/agent-schema';
 import type { Level } from '../../shared/graph';
-import { AgentError, type GenerateRequest, type SchemaAgent } from './types';
+import { AgentError, type AgentActivity, type GenerateRequest, type SchemaAgent } from './types';
 
 export type ScriptKey = `${Level}:${string}`;
 
@@ -20,8 +20,10 @@ export interface FakeSchemaAgentOptions {
   fallback?: (req: GenerateRequest) => AgentGraph;
   /** Throw instead of falling back, to assert a scope is never generated. */
   strict?: boolean;
-  /** Artificial delay, to exercise in-flight de-duplication. */
+  /** Artificial delay, to exercise in-flight de-duplication and cancel. */
   delayMs?: number;
+  /** Scripted tool activity per `${level}:${scopeId}`, reported through `req.onProgress`. */
+  progress?: Record<string, AgentActivity[]>;
 }
 
 export class FakeSchemaAgent implements SchemaAgent {
@@ -29,9 +31,11 @@ export class FakeSchemaAgent implements SchemaAgent {
   /** Every request, in order — the test asserts how often the agent was reached. */
   readonly calls: GenerateRequest[] = [];
   private readonly replies: Map<string, AgentGraph>;
+  private readonly progress: Map<string, AgentActivity[]>;
 
   constructor(private readonly opts: FakeSchemaAgentOptions = {}) {
     this.replies = new Map(Object.entries(opts.replies ?? {}));
+    this.progress = new Map(Object.entries(opts.progress ?? {}));
   }
 
   callsFor(level: Level, scopeId: string): number {
@@ -42,9 +46,17 @@ export class FakeSchemaAgent implements SchemaAgent {
     this.replies.set(scriptKey(level, scopeId), graph);
   }
 
+  setProgress(level: Level, scopeId: string, events: AgentActivity[]): void {
+    this.progress.set(scriptKey(level, scopeId), events);
+  }
+
   async generate(req: GenerateRequest): Promise<AgentGraph> {
     this.calls.push(req);
-    if (this.opts.delayMs) await new Promise((r) => setTimeout(r, this.opts.delayMs));
+    if (req.signal?.aborted) throw new AgentError('The analysis was cancelled.', 'cancelled');
+    for (const event of this.progress.get(scriptKey(req.scope.level, req.scope.id)) ?? []) {
+      req.onProgress?.(event);
+    }
+    if (this.opts.delayMs) await abortableDelay(this.opts.delayMs, req.signal);
     const scripted = this.replies.get(scriptKey(req.scope.level, req.scope.id));
     if (scripted) return structuredClone(scripted);
     if (this.opts.strict) {
@@ -52,6 +64,21 @@ export class FakeSchemaAgent implements SchemaAgent {
     }
     return this.opts.fallback?.(req) ?? emptyAgentGraph();
   }
+}
+
+/** Waits `ms`, or rejects the way the real agent does when the request is aborted. */
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new AgentError('The analysis was cancelled.', 'cancelled'));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 /**
@@ -84,6 +111,7 @@ export function indexDerivedReply(req: GenerateRequest): AgentGraph {
         summary: `Package declared at ${manifest}.`,
         evidence: [{ file: manifest, startLine: 1, endLine: 1, note: 'package manifest' }],
         boundary: false,
+        subsystemId: '',
         memberOf: [],
         paths: [pkg.dir === '.' ? 'src' : pkg.dir],
         hasDetail: true,
@@ -99,6 +127,7 @@ export function indexDerivedReply(req: GenerateRequest): AgentGraph {
         summary: `External dependency imported by ${external.count} files.`,
         evidence: [{ file: user.file, startLine: 1, endLine: 1, note: 'imported here' }],
         boundary: true,
+        subsystemId: '',
         memberOf: [],
         paths: [],
         hasDetail: false,
@@ -120,9 +149,12 @@ export function indexDerivedReply(req: GenerateRequest): AgentGraph {
         summary: `${files.length} source files under ${dir}.`,
         evidence: [{ file: files[0]!, startLine: 1, endLine: 1, note: 'first file of the group' }],
         boundary: false,
+        subsystemId: '',
         memberOf: [],
         paths: [dir],
-        hasDetail: false,
+        // A module group at L3 can be opened into its L2, so the UI's whole path can be
+        // clicked through without Claude.
+        hasDetail: scope.level === 'L3',
       });
     }
   }

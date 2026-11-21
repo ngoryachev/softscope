@@ -72,6 +72,7 @@ export interface NodeSpec {
   kind?: string;
   evidence?: Array<{ file: string; startLine: number; endLine: number }>;
   boundary?: boolean;
+  subsystemId?: string;
   memberOf?: string[];
   paths?: string[];
   hasDetail?: boolean;
@@ -101,6 +102,7 @@ export function agentGraph(nodes: NodeSpec[], edges: EdgeSpec[] = [], extra?: Pa
         note: '',
       })),
       boundary: n.boundary ?? false,
+      subsystemId: n.subsystemId ?? '',
       memberOf: n.memberOf ?? [],
       paths: n.paths ?? [],
       hasDetail: n.hasDetail ?? false,

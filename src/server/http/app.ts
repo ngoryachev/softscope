@@ -8,13 +8,15 @@
 import { readFileSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { Hono } from 'hono';
-import type { ApiError, FileResponse, OpenRepoRequest, RepoState } from '../../shared/api';
+import { streamSSE } from 'hono/streaming';
+import type { UnofficialStatusCode } from 'hono/utils/http-status';
+import type { ApiError, CancelRequest, FileResponse, OpenRepoRequest, ProgressEvent, RepoState } from '../../shared/api';
 import { LEVELS, type Level } from '../../shared/graph';
 import { AgentError, type SchemaAgent } from '../agent/types';
 import { generatableLevels } from '../agent/prompts';
 import type { FileCache } from '../cache/file-cache';
 import { staysInsideRepo } from '../indexer/files';
-import { LevelNotSupportedError, RepoSession, ScopeNotFoundError } from '../session';
+import { GenerationCancelledError, LevelNotSupportedError, RepoSession, ScopeNotFoundError } from '../session';
 
 export interface AppDeps {
   agent: SchemaAgent;
@@ -29,6 +31,11 @@ export interface SoftscopeApp {
 }
 
 const MAX_VIEWED_LINES = 4000;
+
+/** nginx's "client closed request": the generation was cancelled, there is no view. */
+const CANCELLED_STATUS = 499 as UnofficialStatusCode;
+
+const TERMINAL_EVENTS = new Set<ProgressEvent['type']>(['done', 'error', 'cancelled']);
 
 function isLevel(value: string | undefined): value is Level {
   return value !== undefined && (LEVELS as readonly string[]).includes(value);
@@ -95,6 +102,9 @@ export function createApp(deps: AppDeps): SoftscopeApp {
     try {
       return c.json(await session.graph({ level, scopeId, refresh }));
     } catch (err) {
+      if (err instanceof GenerationCancelledError) {
+        return c.json({ error: 'cancelled', detail: err.message } satisfies ApiError, CANCELLED_STATUS);
+      }
       if (err instanceof ScopeNotFoundError) return c.json({ error: err.message }, 404);
       if (err instanceof LevelNotSupportedError) return c.json({ error: err.message }, 501);
       if (err instanceof AgentError) {
@@ -103,6 +113,56 @@ export function createApp(deps: AppDeps): SoftscopeApp {
       }
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
+  });
+
+  /**
+   * The progress of a running generation as Server-Sent Events: the buffered events are
+   * replayed on connect, live ones follow, and the stream ends with the terminal event.
+   * A single `idle` event when nothing is running for that scope.
+   */
+  app.get('/api/graph/progress', (c) => {
+    if (!session) return c.json({ error: 'No repository is open.' }, 409);
+    const level = c.req.query('level') ?? 'L4';
+    if (!isLevel(level)) return c.json({ error: `Unknown level "${level}".` }, 400);
+    const scopeId = c.req.query('scope') ?? 'root';
+    const active = session;
+    return streamSSE(c, async (stream) => {
+      let finish: () => void = () => undefined;
+      const ended = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      // Writes are serialised: the listener is synchronous but the write is not, and
+      // two interleaved writes would corrupt the event framing.
+      let queue = Promise.resolve();
+      const send = (event: ProgressEvent) => {
+        queue = queue
+          .then(() => stream.writeSSE({ data: JSON.stringify(event), event: 'progress' }))
+          .catch(() => undefined);
+      };
+      const detach = active.subscribe(level, scopeId, (event) => {
+        send(event);
+        if (TERMINAL_EVENTS.has(event.type)) finish();
+      });
+      if (!detach) {
+        send({ type: 'idle', level, scopeId });
+        await queue;
+        return;
+      }
+      stream.onAbort(() => finish());
+      await ended;
+      detach();
+      await queue;
+    });
+  });
+
+  app.post('/api/graph/cancel', async (c) => {
+    if (!session) return c.json({ error: 'No repository is open.' }, 409);
+    const body = (await c.req.json().catch(() => ({}))) as Partial<CancelRequest>;
+    if (!isLevel(body.level) || typeof body.scopeId !== 'string') {
+      return c.json({ error: 'A level and a scopeId are required.' }, 400);
+    }
+    const cancelled = session.cancel(body.level, body.scopeId);
+    return c.json({ cancelled });
   });
 
   app.get('/api/file', (c) => {

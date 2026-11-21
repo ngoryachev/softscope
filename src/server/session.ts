@@ -8,11 +8,12 @@
 import { resolve } from 'node:path';
 import { statSync } from 'node:fs';
 import type { AgentGraph } from '../shared/agent-schema';
-import type { GraphResponse, RepoState } from '../shared/api';
+import type { GraphResponse, ProgressEvent, RepoState } from '../shared/api';
 import {
   nextLevel,
   rootScope,
   ROOT_SCOPE_ID,
+  scopeOwnerOf,
   type GraphNode,
   type GraphView,
   type Level,
@@ -20,7 +21,7 @@ import {
   type Snapshot,
 } from '../shared/graph';
 import { generatableLevels, supportsLevel } from './agent/prompts';
-import type { SchemaAgent } from './agent/types';
+import type { SchemaAgent, SiblingRef } from './agent/types';
 import type { CacheKey, FileCache } from './cache/file-cache';
 import { buildIndex, type RepoIndex } from './indexer/index';
 import { isGitRepo, repoSnapshot, sameState } from './indexer/git';
@@ -32,6 +33,12 @@ interface CachedGeneration {
   scope: ScopeRef;
   snapshot: Snapshot;
   raw: AgentGraph;
+}
+
+interface ParentRef {
+  scope: ScopeRef;
+  node: GraphNode;
+  siblings: SiblingRef[];
 }
 
 export class ScopeNotFoundError extends Error {
@@ -48,6 +55,34 @@ export class LevelNotSupportedError extends Error {
   }
 }
 
+/** The generation was cancelled by the user; every request that joined it gets this. */
+export class GenerationCancelledError extends Error {
+  constructor(level: Level, scopeId: string) {
+    super(`Generation of ${level}:${scopeId} was cancelled.`);
+    this.name = 'GenerationCancelledError';
+  }
+}
+
+/** Activity events kept for a subscriber that connects while the agent is already working. */
+const PROGRESS_BUFFER = 40;
+
+export type ProgressListener = (event: ProgressEvent) => void;
+
+/**
+ * One running agent call. Shared by every request that joined the same scope, so
+ * cancelling it affects all of them — this is a single-user local tool.
+ */
+interface GenerationJob {
+  level: Level;
+  scopeId: string;
+  startedAt: string;
+  controller: AbortController;
+  /** `started` first, then the most recent activity; terminal events are not buffered. */
+  events: ProgressEvent[];
+  listeners: Set<ProgressListener>;
+  finished: boolean;
+}
+
 export interface GraphRequest {
   level: Level;
   scopeId: string;
@@ -61,6 +96,7 @@ export class RepoSession {
   private readonly scopes = new Map<string, ScopeRef>();
   private readonly views = new Map<string, GraphView>();
   private readonly inFlight = new Map<string, Promise<GraphResponse>>();
+  private readonly jobs = new Map<string, GenerationJob>();
   private cachedIndex: RepoIndex | null = null;
 
   constructor(
@@ -136,28 +172,11 @@ export class RepoSession {
     };
 
     const cached = req.refresh ? null : this.reusable(cacheKey, index.snapshot);
+    // Computed before the cache branch: validation needs the sibling ids of the parent
+    // view for a cached reply just as much as for a fresh one.
+    const parent = this.parentOf(scope);
 
-    const generation =
-      cached ??
-      (await (async (): Promise<CachedGeneration> => {
-        const parent = this.parentOf(scope);
-        const raw = await this.deps.agent.generate({
-          repoPath: this.repoPath,
-          index,
-          scope,
-          ...(parent ? { parent } : {}),
-          ...(req.signal ? { signal: req.signal } : {}),
-        });
-        const fresh: CachedGeneration = {
-          scope,
-          // The agent's own finish time, not the moment the index was built: an L3
-          // generated minutes after the L4 of the same state is not that old.
-          snapshot: { ...index.snapshot, generatedAt: new Date().toISOString() },
-          raw,
-        };
-        this.deps.cache.set(cacheKey, fresh);
-        return fresh;
-      })());
+    const generation = cached ?? (await this.generate(scope, index, parent, req.signal, cacheKey));
 
     // Validation runs on every read, cached or not: evidence is re-checked against the
     // files that are on disk now, not against the ones that were there at generation.
@@ -166,6 +185,7 @@ export class RepoSession {
       scope,
       snapshot: generation.snapshot,
       raw: generation.raw,
+      subsystemIds: parent?.siblings.map((s) => s.id) ?? [],
     });
     // What the index could not establish belongs next to what the agent could not.
     view.notes = [...index.notes, ...view.notes];
@@ -178,6 +198,114 @@ export class RepoSession {
       issues,
       openable: this.openableFrom(view),
     };
+  }
+
+  /**
+   * Runs the agent for `scope` inside a job the user can watch and cancel. Nothing is
+   * cached when the job was cancelled, whatever the agent returned after the abort.
+   */
+  private async generate(
+    scope: ScopeRef,
+    index: RepoIndex,
+    parent: ParentRef | undefined,
+    requestSignal: AbortSignal | undefined,
+    cacheKey: CacheKey,
+  ): Promise<CachedGeneration> {
+    const job = this.startJob(scope);
+    const onRequestAbort = () => job.controller.abort();
+    if (requestSignal?.aborted) onRequestAbort();
+    else requestSignal?.addEventListener('abort', onRequestAbort, { once: true });
+    try {
+      const raw = await this.deps.agent.generate({
+        repoPath: this.repoPath,
+        index,
+        scope,
+        ...(parent ? { parent } : {}),
+        signal: job.controller.signal,
+        onProgress: ({ tool, detail }) =>
+          this.emit(job, { type: 'activity', tool, detail, at: new Date().toISOString() }),
+      });
+      if (job.controller.signal.aborted) throw new GenerationCancelledError(scope.level, scope.id);
+      const fresh: CachedGeneration = {
+        scope,
+        // The agent's own finish time, not the moment the index was built: an L3
+        // generated minutes after the L4 of the same state is not that old.
+        snapshot: { ...index.snapshot, generatedAt: new Date().toISOString() },
+        raw,
+      };
+      this.deps.cache.set(cacheKey, fresh);
+      this.finishJob(job, { type: 'done', level: scope.level, scopeId: scope.id, at: new Date().toISOString() });
+      return fresh;
+    } catch (err) {
+      const at = new Date().toISOString();
+      if (job.controller.signal.aborted) {
+        this.finishJob(job, { type: 'cancelled', level: scope.level, scopeId: scope.id, at });
+        throw new GenerationCancelledError(scope.level, scope.id);
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      this.finishJob(job, { type: 'error', level: scope.level, scopeId: scope.id, at, message });
+      throw err;
+    } finally {
+      requestSignal?.removeEventListener('abort', onRequestAbort);
+    }
+  }
+
+  /** Aborts the running generation of a scope. False when nothing is running for it. */
+  cancel(level: Level, scopeId: string): boolean {
+    const job = this.jobs.get(key(level, scopeId));
+    if (!job || job.finished) return false;
+    job.controller.abort();
+    return true;
+  }
+
+  /**
+   * Attaches to the running generation of a scope: the buffered events are replayed,
+   * then live ones follow until a terminal event. Null when nothing is running.
+   */
+  subscribe(level: Level, scopeId: string, listener: ProgressListener): (() => void) | null {
+    const job = this.jobs.get(key(level, scopeId));
+    if (!job || job.finished) return null;
+    for (const event of job.events) listener(event);
+    job.listeners.add(listener);
+    return () => {
+      job.listeners.delete(listener);
+    };
+  }
+
+  private startJob(scope: ScopeRef): GenerationJob {
+    const startedAt = new Date().toISOString();
+    const job: GenerationJob = {
+      level: scope.level,
+      scopeId: scope.id,
+      startedAt,
+      controller: new AbortController(),
+      events: [],
+      listeners: new Set(),
+      finished: false,
+    };
+    // A refresh replaces the job of the plain request it overlaps; `finishJob` only
+    // removes the entry that still belongs to the finishing job.
+    this.jobs.set(key(scope.level, scope.id), job);
+    this.emit(job, { type: 'started', level: scope.level, scopeId: scope.id, startedAt });
+    return job;
+  }
+
+  private emit(job: GenerationJob, event: ProgressEvent): void {
+    if (job.finished) return;
+    job.events.push(event);
+    // Keep `started` and the most recent activity; a late subscriber does not need the
+    // whole history, only enough to see what the agent is doing now.
+    if (job.events.length > PROGRESS_BUFFER + 1) job.events.splice(1, job.events.length - PROGRESS_BUFFER - 1);
+    for (const listener of job.listeners) listener(event);
+  }
+
+  private finishJob(job: GenerationJob, event: ProgressEvent): void {
+    if (job.finished) return;
+    for (const listener of job.listeners) listener(event);
+    job.finished = true;
+    job.listeners.clear();
+    const id = key(job.level, job.scopeId);
+    if (this.jobs.get(id) === job) this.jobs.delete(id);
   }
 
   /**
@@ -226,10 +354,18 @@ export class RepoSession {
     return found;
   }
 
-  private parentOf(scope: ScopeRef): { scope: ScopeRef; node: GraphNode } | undefined {
+  /**
+   * The node the user opened to reach `scope`, with the other non-boundary nodes of the
+   * same view: the neighbouring subsystems an L2 boundary node may belong to.
+   */
+  private parentOf(scope: ScopeRef): ParentRef | undefined {
     for (const view of this.views.values()) {
       const node = view.nodes.find((n) => n.childScope?.id === scope.id && n.childScope.level === scope.level);
-      if (node) return { scope: view.scope, node };
+      if (!node) continue;
+      const siblings: SiblingRef[] = view.nodes
+        .filter((n) => n.id !== node.id && !n.boundary)
+        .map((n) => ({ id: n.id, title: n.title, paths: [...n.paths] }));
+      return { scope: view.scope, node, siblings };
     }
     return undefined;
   }
@@ -258,17 +394,3 @@ function parentOfLevel(level: Level): Level | null {
   const i = order.indexOf(level);
   return i > 0 ? order[i - 1]! : null;
 }
-
-/**
- * A node id is `<level>:<scope>/<slug>`, so the scope that owns a node — and therefore
- * the view that has to be generated to reach it — is readable from the id itself.
- *
- * The slug is after the LAST slash: a deeper scope id embeds its own parent, so
- * `L3:L4:root/app/sub` is owned by `L4:root/app`, not by `L4:root`.
- */
-function scopeOwnerOf(nodeIdValue: string): string | null {
-  const colon = nodeIdValue.indexOf(':');
-  const slash = nodeIdValue.lastIndexOf('/');
-  return colon > 0 && slash > colon ? nodeIdValue.slice(colon + 1, slash) : null;
-}
-

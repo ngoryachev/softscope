@@ -3,9 +3,9 @@
  * by the agent from the code, it shows the system as it is, and it does not idealize or
  * mentally refactor anything.
  *
- * Levels are a registry on purpose. L2 (entities) and L1 (behaviour) are later steps of
- * the product cycle; they are added by registering a builder here, with no change to
- * the agent interface, the cache or the UI's navigation.
+ * Levels are a registry on purpose. L1 (behaviour) is a later step of the product
+ * cycle; it is added by registering a builder here, with no change to the agent
+ * interface, the cache or the UI's navigation.
  */
 import type { Level } from '../../shared/graph';
 import { summarizeForAgent } from '../indexer/index';
@@ -130,6 +130,77 @@ ${SIZE_GUIDANCE(20)}`,
   };
 }
 
+function l2Prompt(req: GenerateRequest): PromptPair {
+  const digest = summarizeForAgent(req.index, req.scope);
+  const parent = req.parent;
+  const siblings = parent?.siblings ?? [];
+  const siblingList =
+    siblings.length > 0
+      ? siblings
+          .map((s) => `- id: ${s.id}\n  title: ${s.title}\n  paths: ${s.paths.join(', ') || '(none)'}`)
+          .join('\n')
+      : '(none known)';
+  return {
+    system: COMMON_RULES,
+    prompt: `${digest}
+
+# Task: build the L2 schema (entities) of the subsystem "${req.scope.label}"
+
+${
+  parent
+    ? `The user opened the L3 node "${parent.node.title}" (${parent.node.kind}) of "${parent.scope.label}": ${parent.node.summary}\n`
+    : ''
+}The subsystem consists of the scope paths listed above. The index slice above covers
+only the files inside the subsystem and what they import; it is deliberately not the
+whole repository.
+
+## Boundaries of the analysis
+- Describe only the entities inside the scope paths: classes, services, functions,
+  state modules, stores, key types, handlers — whatever this code is actually built
+  from. Group small helpers by what they do rather than listing every function.
+- Read code outside the subsystem ONLY to confirm a relation that crosses its boundary
+  (who calls into it, what it calls out to). Never describe or detail a neighbouring
+  subsystem: its internals stay collapsed (SPEC 6.2).
+- An entity outside the subsystem that has a confirmed relation into or out of it is a
+  boundary node (boundary=true) with that one relation, nothing more. Give it only the
+  evidence of its declaration or of the call site; do not list its own dependencies.
+
+## The neighbouring subsystems of this view
+These are the other L3 nodes next to "${req.scope.label}" (ids are exact; use them
+verbatim):
+${siblingList}
+
+- For a boundary node that is code of this repository, set subsystemId to the id of the
+  neighbouring subsystem it belongs to (match the file against the paths above). Set
+  subsystemId to "" when the file matches none of them, or when the boundary is an
+  external dependency, a datastore or a runtime boundary. Never set subsystemId on a
+  non-boundary node.
+- SHARED ENTITIES (SPEC 5.1): when an entity of this subsystem is also used as part of a
+  neighbouring subsystem, do not duplicate it. List that subsystem's boundary node in
+  the entity's memberOf, next to the groups it belongs to inside this subsystem. Only
+  slugs of nodes in this reply may appear in memberOf.
+
+## Evidence
+- Evidence of an entity = the lines of its declaration (the class, function, type or
+  variable statement), read from the file.
+- Evidence of an edge = the lines where the relation happens: the call, the import, the
+  place the data is passed, the place the event is emitted or handled. A relation you
+  believe exists but could not see in the code stays with confirmed=false and a reason.
+
+## Diagram kind (SPEC 5.3)
+Choose "component-graph" when the subsystem is best understood as parts and their
+dependencies, or "data-flow" when it is best understood as data moving through a chain
+of entities. For data-flow, every edge label must name the data that moves (the
+argument, the message, the record, the event payload); for a component graph the label
+may be the relation kind.
+
+Set paths on every non-boundary node to the files that define it. Set hasDetail=false:
+entities are not opened further in this version.
+
+${SIZE_GUIDANCE(24)}`,
+  };
+}
+
 /**
  * Level -> prompt builder. A level that is absent here cannot be generated; the server
  * reports it and the UI disables the drill-in affordance instead of failing a request.
@@ -137,6 +208,7 @@ ${SIZE_GUIDANCE(20)}`,
 export const PROMPT_BUILDERS: Partial<Record<Level, (req: GenerateRequest) => PromptPair>> = {
   L4: l4Prompt,
   L3: l3Prompt,
+  L2: l2Prompt,
 };
 
 export function generatableLevels(): Level[] {

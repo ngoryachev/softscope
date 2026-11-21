@@ -32,6 +32,11 @@ export interface ValidateOptions {
   scope: ScopeRef;
   snapshot: Snapshot;
   raw: AgentGraph;
+  /**
+   * Ids a boundary node may name as the subsystem it belongs to: the other nodes of the
+   * parent view. Any other value is dropped — the agent must not invent a destination.
+   */
+  subsystemIds?: string[];
 }
 
 export interface ValidateResult {
@@ -133,9 +138,42 @@ function checkEvidence(
   return out;
 }
 
-export function validateView({ repoPath, scope, snapshot, raw }: ValidateOptions): ValidateResult {
+/**
+ * The subsystem a boundary node claims to belong to, kept only when it is one of the
+ * known sibling ids and the node really is a boundary node. A wrong link would send the
+ * user to a subsystem the code does not point at, so it is reported and cleared.
+ */
+function subsystemLink(
+  node: AgentGraph['nodes'][number],
+  id: string,
+  known: Set<string>,
+  issues: ValidationIssue[],
+): string {
+  const link = (node.subsystemId ?? '').trim();
+  if (link.length === 0) return '';
+  if (!node.boundary) {
+    issues.push({
+      kind: 'subsystem-link-dropped',
+      message: `Node "${node.title}" is not a boundary node; its subsystem link "${link}" was dropped.`,
+      nodeId: id,
+    });
+    return '';
+  }
+  if (!known.has(link)) {
+    issues.push({
+      kind: 'subsystem-link-dropped',
+      message: `Boundary node "${node.title}" links to unknown subsystem "${link}"; the link was dropped.`,
+      nodeId: id,
+    });
+    return '';
+  }
+  return link;
+}
+
+export function validateView({ repoPath, scope, snapshot, raw, subsystemIds = [] }: ValidateOptions): ValidateResult {
   const facts = new FileFacts(repoPath);
   const issues: ValidationIssue[] = [];
+  const knownSubsystems = new Set(subsystemIds);
 
   // Two different slugs can sanitise to the same id ("HTTP API" and "http-api"), and
   // they are two different nodes: giving them one id would drop the second and silently
@@ -182,6 +220,7 @@ export function validateView({ repoPath, scope, snapshot, raw }: ValidateOptions
       summary: node.summary,
       evidence,
       boundary: node.boundary,
+      subsystemId: subsystemLink(node, id, knownSubsystems, issues),
       memberOf: [],
       paths: paths.length > 0 ? paths : [...new Set(evidence.map((e) => e.file))],
       childScope: null,
